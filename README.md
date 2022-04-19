@@ -36,6 +36,8 @@ Simple guide to apply the patch:<br>
     $ mkdir ../build && cd ../build
     $ ../qemu-6.2.0/configure && make
 
+Or use the predefined scripts for respective versions (it builds the x86 version only).
+
 ## Building Guest Wrappers
 **Requirements:**
  - `base-devel` (make, sed, xxd)
