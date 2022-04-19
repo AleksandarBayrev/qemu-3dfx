@@ -1,4 +1,5 @@
 #!/bin/bash
+bash ./clean.sh
 wget https://download.qemu.org/qemu-3.1.1.tar.xz
 tar xfv qemu-3.1.1.tar.xz
 rm -rfv qemu-3.1.1.tar.xz

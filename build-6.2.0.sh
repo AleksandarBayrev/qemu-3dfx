@@ -1,4 +1,5 @@
 #!/bin/bash
+bash ./clean.sh
 wget https://download.qemu.org/qemu-6.2.0.tar.xz
 tar xfv qemu-6.2.0.tar.xz
 rm -rfv qemu-6.2.0.tar.xz
