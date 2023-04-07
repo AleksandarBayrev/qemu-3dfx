@@ -9,4 +9,4 @@ rsync -r ../qemu-1/hw/mesa ./hw/
 patch -p0 -i ../00-qemu720-mesa-glide.patch
 bash ../scripts/sign_commit
 rm -rfv ../build && mkdir ../build && cd ../build
-../qemu-6.2.0/configure --target-list=i386-softmmu && make -j
+../qemu-7.2.0/configure --target-list=i386-softmmu && make -j
