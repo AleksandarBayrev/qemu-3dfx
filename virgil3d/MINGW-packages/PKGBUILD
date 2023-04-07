@@ -3,7 +3,7 @@
 _realname=virglrenderer
 pkgbase=mingw-w64-${_realname}
 pkgname=${MINGW_PACKAGE_PREFIX}-${_realname}
-pkgver=0.9.1
+pkgver=0.10.4
 pkgrel=1
 pkgdesc='A virtual 3D GPU library, that allows the guest operating system to use the host GPU to accelerate 3D rendering'
 arch=('any')
@@ -14,15 +14,14 @@ depends=("${MINGW_PACKAGE_PREFIX}-libepoxy")
 makedepends=("${MINGW_PACKAGE_PREFIX}-python"
              "${MINGW_PACKAGE_PREFIX}-meson"
              "${MINGW_PACKAGE_PREFIX}-ninja")
-_tag=virglrenderer-$pkgver
+_tag=$pkgver
 source=("virglrenderer-$pkgver.tar.bz2::https://gitlab.freedesktop.org/virgl/virglrenderer/-/archive/$_tag/virglrenderer-$_tag.tar.bz2"
-        '0001-Virglrenderer-on-Windows-and-macOS.patch')
-sha256sums=('860cc3f0f1a448542a812b6e13909824eb3140b7b3283d068e9640487d50e6c0'
-            'a6fcb37f882d37d353951564ccbe2834ea6eddee8426402142aeed620a06ea00')
-
+        "0001-Virglrenderer-on-Windows-and-macOS.patch")
+sha256sums=('b42dbbc87f799feb77f89a246336253aedc733f7c3c78d4103158438deea5a6d'
+            '6beee5930ff602de252c7c698eb397048d638c64fd44b2d2a78ad8d0cbda5527')
 prepare() {
   cd virglrenderer-$_tag
-  patch -p1 -i ${srcdir}/0001-Virglrenderer-on-Windows-and-macOS.patch
+  patch -p2 -i ${srcdir}/0001-Virglrenderer-on-Windows-and-macOS.patch
 }
 
 build() {
@@ -35,5 +34,5 @@ build() {
 package() {
   cd virglrenderer-$_tag
   DESTDIR="$pkgdir" ninja -C build install
-  install -D -m644 "${srcdir}/${_realname}-${_realname}-${pkgver}/COPYING" "${pkgdir}/${MINGW_PREFIX}/share/licenses/${_realname}/COPYING"
+  install -D -m644 "${srcdir}/${_realname}-${pkgver}/COPYING" "${pkgdir}/${MINGW_PREFIX}/share/licenses/${_realname}/COPYING"
 }

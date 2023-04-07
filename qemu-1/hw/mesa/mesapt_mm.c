@@ -20,7 +20,6 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
-#include "qemu-common.h"
 #include "hw/hw.h"
 #include "hw/i386/pc.h"
 #include "hw/sysbus.h"
@@ -353,7 +352,7 @@ static void InitClientStates(MesaPTState *s)
 
 static void dispTimerProc(void *opaque)
 {
-    MGLActivateHandler(0);
+    MGLActivateHandler(0, 1);
 }
 
 static void dispTimerSched(QEMUTimer *ts)
@@ -1541,6 +1540,8 @@ static void processArgs(MesaPTState *s)
             break;
         case FEnum_glGetActiveUniform:
         case FEnum_glGetActiveUniformARB:
+        case FEnum_glGetTransformFeedbackVarying:
+        case FEnum_glGetTransformFeedbackVaryingEXT:
             memset(outshm, 0, 4*ALIGNED(1));
             s->parg[3] = VAL(outshm);
             s->parg[0] = VAL(PTR(outshm, ALIGNED(1)));
@@ -1575,11 +1576,11 @@ static void processArgs(MesaPTState *s)
             break;
         case FEnum_glDebugMessageInsertARB:
             s->datacb = ALIGNED(s->arg[4]);
-            if ((s->arg[0] == GL_DEBUG_SOURCE_API_ARB) &&
-                (s->arg[1] == GL_DEBUG_TYPE_PERFORMANCE_ARB) &&
+            if ((s->arg[0] == GL_DEBUG_SOURCE_WINDOW_SYSTEM_ARB) &&
+                (s->arg[1] == GL_DEBUG_TYPE_OTHER_ARB) &&
                 (s->arg[2] == GL_DEBUG_SEVERITY_LOW_ARB) &&
-                (0xbf0acc == *(uint32_t *)(s->hshm)))
-                GLBufOAccelCfg(1);
+                (sizeof(uint32_t) == s->arg[4]))
+                MGLMouseWarp(*(uint32_t *)(s->hshm));
             DPRINTF_COND(((s->arg[0] == GL_DEBUG_SOURCE_OTHER_ARB) &&
                 (s->arg[1] == GL_DEBUG_TYPE_OTHER_ARB) &&
                 (s->arg[2] == GL_DEBUG_SEVERITY_LOW_ARB)), "%s", (char *)(s->hshm));
@@ -1587,45 +1588,87 @@ static void processArgs(MesaPTState *s)
         case FEnum_glShaderSource:
         case FEnum_glShaderSourceARB:
             {
-                char **str;
+                char **str, *p;
                 int i, offs = 0, *len = (int *)(s->hshm);
                 if (s->arg[3]) {
-                    for (i = 0; i < s->arg[1]; i++)
-                        offs += ALIGNED(len[i]) + ALIGNED(1);
-                    str = (char **)PTR(s->hshm, offs + ALIGNED(s->arg[1]*sizeof(int)));
-                    str[0] = (char *)PTR(s->hshm, ALIGNED(s->arg[1]*sizeof(int)));
-                    for (i = 1; i < s->arg[1]; i++)
-                        str[i] = str[i-1] + ALIGNED(len[i-1]) + ALIGNED(1);
-                    if (0) {
-                        DPRINTF("ShaderSource");
+                    p = (char *)PTR(s->hshm, ALIGNED((s->arg[1] * sizeof(int))));
+                    for (i = 0; i < s->arg[1]; i++) {
+                        int slen = (len[i] > 0)? ALIGNED(len[i]):ALIGNED(strlen(p));
+                        slen += ALIGNED(1);
+                        p += slen;
+                        offs += slen;
+                    }
+                    s->datacb = offs + (s->arg[1] * ALIGNED(1))
+                        + ALIGNED((s->arg[1] * sizeof(uint32_t)));
+                    str = (char **)PTR(s->hshm, offs);
+                    p = (char *)PTR(s->hshm, ALIGNED((s->arg[1] * sizeof(int))));
+                    str[0] = p;
+                    for (i = 1; i < s->arg[1]; i++) {
+                        int slen = (len[i] > 0)? ALIGNED(len[i]):ALIGNED(strlen(p));
+                        p += (slen + ALIGNED(1));
+                        str[i] = (char *)PTR(s->hshm, slen);
+                    }
+                    if (GLShaderDump()) {
+                        DPRINTF("-------- ShaderSource %04x -------->>>>", s->arg[0]);
                         for (i = 0; i < s->arg[1]; i++)
                             fprintf(stderr, "%s", str[i]);
+                        DPRINTF("<<<<-------- %04x ShaderSource --------", s->arg[0]);
                     }
-                    s->datacb = ALIGNED(s->arg[1]*sizeof(int)) + offs;
                     s->parg[3] = VAL(len);
                 }
                 else {
-                    char *send = (char *)(s->hshm);
+                    p = (char *)(s->hshm);
                     for (i = 0; i < s->arg[1]; i++) {
-                        offs = ALIGNED((strlen(send) + 1));
-                        send += offs;
+                        int slen = ALIGNED((strlen(p) + 1));
+                        p += slen;
+                        offs += slen;
                     }
-                    s->datacb = VAL(send) - VAL(s->hshm);
-                    s->parg[3] = 0;
-                    str = (char **)send;
-                    send = (char *)(s->hshm);
-                    offs = 0;
-                    str[0] = send;
+                    s->datacb = offs + (s->arg[1] * ALIGNED(1));
+                    str = (char **)PTR(s->hshm, offs);
+                    p = (char *)(s->hshm);
+                    str[0] = p;
                     for (i = 1; i < s->arg[1]; i++) {
-                        offs = ALIGNED((strlen(send) + 1));
-                        send += offs;
-                        str[i] = send;
+                        int slen = ALIGNED((strlen(p) + 1));
+                        p += slen;
+                        str[i] = (char *)PTR(s->hshm, slen);
                     }
-                    if (0) {
-                        DPRINTF("ShaderSource");
+                    if (GLShaderDump()) {
+                        DPRINTF("-------- ShaderSource %04x -------->>>>", s->arg[0]);
                         for (i = 0; i < s->arg[1]; i++)
                             fprintf(stderr, "%s", str[i]);
+                        DPRINTF("<<<<-------- %04x ShaderSource --------", s->arg[0]);
                     }
+                    s->parg[3] = 0;
+                }
+                s->parg[2] = VAL(str);
+            }
+            break;
+        case FEnum_glTransformFeedbackVaryings:
+        case FEnum_glTransformFeedbackVaryingsEXT:
+            {
+                char **str, *p;
+                int i, offs = 0;
+                p = (char *)(s->hshm);
+                for (i = 0; i < s->arg[1]; i++) {
+                    int len = ALIGNED((strlen(p) + 1));
+                    p += len;
+                    offs += len;
+                }
+                s->datacb = offs + ALIGNED((s->arg[1] * sizeof(uint32_t)));
+                str = (char **)PTR(s->hshm, offs);
+                p = (char *)(s->hshm);
+                str[0] = p;
+                for (i = 1; i < s->arg[1]; i++) {
+                    int len = ALIGNED((strlen(p) + 1));
+                    p += len;
+                    str[i] = p;
+                }
+                if (GLShaderDump()) {
+                    DPRINTF("TransformFeedbackVaryings prog %04x count %d mode %04x",
+                        s->arg[0], s->arg[1], s->arg[3]);
+                    for (i = 0; i < s->arg[1]; i++)
+                        fprintf(stderr, " %s ", str[i]);
+                    fprintf(stderr, "%s", "\n");
                 }
                 s->parg[2] = VAL(str);
             }
@@ -1824,7 +1867,7 @@ static void processFRet(MesaPTState *s)
             break;
         case FEnum_glFinish:
         case FEnum_glFlush:
-            MGLActivateHandler(1);
+            MGLActivateHandler(1, 0);
             dispTimerSched(s->dispTimer);
             break;
         case FEnum_glMapBuffer:
@@ -1912,7 +1955,10 @@ static void processFRet(MesaPTState *s)
                     *(uint32_t *)PTR(outshm, ALIGNED(1)),
                     *(uint32_t *)PTR(outshm, 2*ALIGNED(1)));
             break;
-#endif
+        case FEnum_glCompileShader:
+            wrCompileShaderStatus(s->arg[0]);
+            break;
+#endif /* MGL_TRACE */
         case FEnum_glGetString:
             if (s->FRet) {
 #define MAX_XSTR (3*PAGE_SIZE)
@@ -1982,7 +2028,7 @@ static void processFRet(MesaPTState *s)
     xbuf += len; \
     *(xbuf++) = ' '; }
                     *xbuf = '\0';
-                    if ((MGLExtIsAvail((const char *)outshm, "GL_APPLE_packed_pixels")) &&
+                    if ((MGLExtIsAvail((const char *)outshm, "GL_APPLE_packed_pixels")) ||
                         (MGLExtIsAvail((const char *)outshm, packPixel) == 0))
                         XSTR_ADD(packPixel);
                     *xbuf = '\0';
@@ -2187,7 +2233,7 @@ static void mesapt_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
                         snprintf(strTimerMS, 8, "%dms", disptmr);
                         DPRINTF_COND(GetContextMSAA(), "ContextMSAA %dx", GetContextMSAA());
                         DPRINTF_COND(ContextVsyncOff(), "ContextVsyncOff");
-                        DPRINTF_COND(GetFpsLimit(), "FpsLimit %dFPS", GetFpsLimit());
+                        DPRINTF_COND(GetFpsLimit(), "FpsLimit [ %d FPS ]", GetFpsLimit());
                         DPRINTF("VertexArrayCache %dMB", GetVertCacheMB());
                         DPRINTF("DispTimerSched %s", disptmr? strTimerMS:"disabled");
                         DPRINTF("MappedBufferObject %s-copy", MGLUpdateGuestBufo(0, 0)? "Zero":"One");
@@ -2197,8 +2243,10 @@ static void mesapt_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
                         dispTimerSched(s->dispTimer);
                     }
                     else {
-                        DPRINTF_COND((ptVer[0] && (0 == NumPbuffer())),
+                        static int lvl_prev;
+                        DPRINTF_COND((ptVer[0] && (lvl_prev != level) && (0 == NumPbuffer())),
                             "wglMakeCurrent cntx %d curr %d lvl %d", s->mglContext, s->mglCntxCurrent, level);
+                        lvl_prev = level;
                         MGLMakeCurrent(ptVer[0], level);
                     }
                 } while(0);
@@ -2228,18 +2276,39 @@ static void mesapt_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
                 s->perfs.stat();
                 do {
                     uint32_t *swapRet = (uint32_t *)(s->fifo_ptr + (MGLSHM_SIZE - ALIGNED(1)));
-                    swapRet[0] = MGLSwapBuffers()? ((GetFpsLimit() << 8) | 1):0;
+                    DPRINTF_COND(SwapFpsLimit(swapRet[0]), "Guest GL Swap limit [ %d FPS ]", GetFpsLimit());
+                    swapRet[0] = MGLSwapBuffers()? ((GetFpsLimit() << 1) | 1):0;
+                    MGLMouseWarp(swapRet[1]);
                     dispTimerSched(s->dispTimer);
                 } while(0);
                 break;
             case 0xFEC:
+                do {
+                    uint8_t *ppfd = s->fifo_ptr + (MGLSHM_SIZE - PAGE_SIZE);
+                    int enable = (*(int *)ppfd) & 0x01U;
+                    int msaa = (*(int *)ppfd) & 0x0CU;
+                    int width = (*(int *)ppfd) >> 16;
+                    int msec = *(int *)PTR(ppfd, sizeof(int));
+                    GLBufOAccelCfg(enable);
+                    GLContextMSAA(msaa);
+                    GLScaleWidth(width);
+                    GLDispTimerCfg(msec);
+                } while(0);
                 s->pixfmt = MGLChoosePixelFormat();
                 break;
             case 0xFE8:
                 do {
                     uint8_t *ppfd = s->fifo_ptr + (MGLSHM_SIZE - PAGE_SIZE);
-                    int pixfmt = *(int *)ppfd;
-                    unsigned int nbytes = *(uint32_t *)PTR(ppfd, sizeof(int));
+                    int enable = (*(int *)ppfd) & 0x01U;
+                    int msaa = (*(int *)ppfd) & 0x0CU;
+                    int width = (*(int *)ppfd) >> 16;
+                    int msec = *(int *)PTR(ppfd, sizeof(int));
+                    int pixfmt = *(int *)PTR(ppfd, 2*sizeof(int));
+                    unsigned int nbytes = *(uint32_t *)PTR(ppfd, 3*sizeof(int));
+                    GLBufOAccelCfg(enable);
+                    GLContextMSAA(msaa);
+                    GLScaleWidth(width);
+                    GLDispTimerCfg(msec);
                     s->pixfmtMax = ((uint32_t *)s->fifo_ptr)[1]? MGLDescribePixelFormat(pixfmt, nbytes, ppfd):0;
                 } while(0);
                 break;
@@ -2274,12 +2343,17 @@ static void mesapt_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
                             s->mglCntxWGL = argsp[0];
                             ContextCreateCommon(s);
                         }
-                        DPRINTF("wglCreateContextAttribsARB cntx %d curr %d ret %d lvl %x",
-                            s->mglContext, s->mglCntxCurrent, argsp[0], argsp[1]);
+                        DPRINTF("wglCreateContextAttribsARB cntx %d curr %d ret %d %s",
+                            s->mglContext, s->mglCntxCurrent, argsp[0], (argsp[1] == 0)? "zero":"incr");
                     }
                     if (strncmp((const char *)func, "wglChoosePixelFormatARB", 64) == 0) {
                         uint32_t *argsp = (uint32_t *)(func + ALIGNED(strnlen((const char *)func, 64)));
                         s->mglCntxWGL = argsp[0];
+                    }
+                    if (strncmp((const char *)func, "wglSetDeviceCursor3DFX", 64) == 0) {
+                        uint32_t *argsp = (uint32_t *)(func + ALIGNED(strnlen((const char *)func, 64)));
+                        uint8_t *data = s->fbtm_ptr + (MGLFBT_SIZE - ALIGNED(argsp[2] * argsp[3] * sizeof(uint32_t)));
+                        MGLCursorDefine(argsp[0], argsp[1], argsp[2], argsp[3], data);
                     }
                 } while(0);
                 break;
@@ -2288,7 +2362,7 @@ static void mesapt_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
                     int *i = (int *)(s->fifo_ptr + (MGLSHM_SIZE - PAGE_SIZE));
                     if (s->mglContext && s->mglCntxCurrent) {
                         DPRINTF_COND((GLFuncTrace()), "ActivateHandler %d", i[0]);
-                        MGLActivateHandler(i[0]);
+                        MGLActivateHandler(i[0], 0);
                         if (i[0])
                             dispTimerSched(s->dispTimer);
                     }

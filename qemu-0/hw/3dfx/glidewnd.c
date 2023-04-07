@@ -20,7 +20,6 @@
 
 #include "qemu/osdep.h"
 #include "qemu/timer.h"
-#include "qemu-common.h"
 #include "ui/console.h"
 
 #include "glide2x_impl.h"
@@ -55,8 +54,7 @@ static struct tblGlideResolution tblRes[] = {
   { .w = 0, .h = 0},
 };
 
-static int cfg_ovrdHwnd;
-static int cfg_scaleGuiX;
+static int cfg_scaleGuiOff;
 static int cfg_scaleX;
 static int cfg_cntxMSAA;
 static int cfg_cntxSRGB;
@@ -67,6 +65,7 @@ static int cfg_lfbNoAux;
 static int cfg_lfbLockDirty;
 static int cfg_lfbWriteMerge;
 static int cfg_lfbMapBufo;
+static int cfg_Annotate;
 static int cfg_MipMaps;
 static int cfg_traceFifo;
 static int cfg_traceFunc;
@@ -83,9 +82,9 @@ int glide_mapbufo(mapbufo_t *bufo, int add)
     int ret = (!cfg_lfbHandler && !cfg_lfbWriteMerge && cfg_lfbMapBufo)? kvm_enabled():0;
 
     if (ret && bufo && bufo->hva) {
-        kvm_update_guest_pa_range(MBUFO_BASE | (bufo->hva & ((MBUFO_SIZE - 1) - (qemu_real_host_page_size - 1))),
-            bufo->mapsz + (bufo->hva & (qemu_real_host_page_size - 1)),
-            (void *)(bufo->hva & qemu_real_host_page_mask),
+        kvm_update_guest_pa_range(MBUFO_BASE | (bufo->hva & ((MBUFO_SIZE - 1) - (qemu_real_host_page_size() - 1))),
+            bufo->mapsz + (bufo->hva & (qemu_real_host_page_size() - 1)),
+            (void *)(bufo->hva & qemu_real_host_page_mask()),
             bufo->acc, add);
         bufo->hva = (add)? bufo->hva:0;
     }
@@ -101,9 +100,9 @@ int glide_mapbufo(mapbufo_t *bufo, int add)
     int ret = (!cfg_lfbHandler && !cfg_lfbWriteMerge && cfg_lfbMapBufo)? whpx_enabled():0;
 
     if (ret && bufo && bufo->hva) {
-        whpx_update_guest_pa_range(MBUFO_BASE | (bufo->hva & ((MBUFO_SIZE - 1) - (qemu_real_host_page_size - 1))),
-            bufo->mapsz + (bufo->hva & (qemu_real_host_page_size - 1)),
-            (void *)(bufo->hva & qemu_real_host_page_mask),
+        whpx_update_guest_pa_range(MBUFO_BASE | (bufo->hva & ((MBUFO_SIZE - 1) - (qemu_real_host_page_size() - 1))),
+            bufo->mapsz + (bufo->hva & (qemu_real_host_page_size() - 1)),
+            (void *)(bufo->hva & qemu_real_host_page_mask()),
             bufo->acc, add);
         bufo->hva = (add)? bufo->hva:0;
     }
@@ -182,6 +181,7 @@ static int scaledRes(int w, float r)
 int GRFifoTrace(void) { return cfg_traceFifo; }
 int GRFuncTrace(void) { return (cfg_traceFifo)? 0:cfg_traceFunc; }
 int glide_fpslimit(void) { return cfg_fpsLimit; }
+int glide_vsyncoff(void) { return cfg_cntxVsyncOff; }
 int glide_lfbmerge(void) { return (cfg_lfbMapBufo)? 0:cfg_lfbWriteMerge; }
 int glide_lfbdirty(void) { return (cfg_lfbMapBufo)? 0:cfg_lfbLockDirty; }
 int glide_lfbnoaux(void) { return cfg_lfbNoAux; }
@@ -191,8 +191,6 @@ void glide_winres(const int res, int *w, int *h)
     *w = tblRes[res].w;
     *h = tblRes[res].h;
 }
-
-int othr_hwnd(void) { return cfg_ovrdHwnd; }
 
 int stat_window(const int res, void *opaque)
 {
@@ -205,8 +203,7 @@ int stat_window(const int res, void *opaque)
     if (stat) {
 	int wndStat = glide_window_stat(disp_cb->activate);
 	if (disp_cb->activate) {
-            wndStat = ((wndStat > 1) && glide_fullscreen)?
-                (((tblRes[sel].h & 0x7FFFU) << 0x10) | tblRes[sel].w):wndStat;
+            wndStat = (wndStat > 1)? (((tblRes[sel].h & 0x7FFFU) << 0x10) | tblRes[sel].w):wndStat;
 	    if (wndStat == (((tblRes[sel].h & 0x7FFFU) << 0x10) | tblRes[sel].w)) {
 		DPRINTF("    %s %ux%u %s", (glide_fullscreen)? "fullscreen":"window",
                     (wndStat & 0xFFFFU), (wndStat >> 0x10), (cfg_scaleX)? "(scaled)":"");
@@ -243,8 +240,7 @@ void init_window(const int res, const char *wndTitle, void *opaque)
 {
     window_cb *disp_cb = opaque;
 
-    cfg_ovrdHwnd = 0;
-    cfg_scaleGuiX = 1;
+    cfg_scaleGuiOff = 0;
     cfg_scaleX = 0;
     cfg_cntxMSAA = 0;
     cfg_cntxSRGB = 0;
@@ -255,6 +251,7 @@ void init_window(const int res, const char *wndTitle, void *opaque)
     cfg_lfbLockDirty = 0;
     cfg_lfbWriteMerge = 0;
     cfg_lfbMapBufo = 0;
+    cfg_Annotate = 0;
     cfg_MipMaps = 0;
     cfg_traceFifo = 0;
     cfg_traceFunc = 0;
@@ -264,10 +261,8 @@ void init_window(const int res, const char *wndTitle, void *opaque)
         char line[32];
         int i, c;
         while (fgets(line, 32, fp)) {
-            i = sscanf(line, "OverrideHwnd,%d", &c);
-            cfg_ovrdHwnd = ((i == 1) && c)? 1:cfg_ovrdHwnd;
-            i = sscanf(line, "ScaleGuiX,%d", &c);
-            cfg_scaleGuiX = ((i == 1) && (c == 0))? 0:cfg_scaleGuiX;
+            i = sscanf(line, "ScaleGuiOff,%d", &c);
+            cfg_scaleGuiOff = ((i == 1) && c)? 1:cfg_scaleGuiOff;
             i = sscanf(line, "ScaleWidth,%d", &c);
             cfg_scaleX = ((i == 1) && c)? c:cfg_scaleX;
             i = sscanf(line, "ContextMSAA,%d", &c);
@@ -277,7 +272,7 @@ void init_window(const int res, const char *wndTitle, void *opaque)
             i = sscanf(line, "ContextVsyncOff,%d", &c);
             cfg_cntxVsyncOff = ((i == 1) && c)? 1:cfg_cntxVsyncOff;
             i = sscanf(line, "FpsLimit,%d", &c);
-            cfg_fpsLimit = (i == 1)? (c & 0x3FU):cfg_fpsLimit;
+            cfg_fpsLimit = (i == 1)? (c & 0x7FU):cfg_fpsLimit;
             i = sscanf(line, "LfbHandler,%d", &c);
             cfg_lfbHandler = ((i == 1) && c)? 1:cfg_lfbHandler;
             i = sscanf(line, "LfbNoAux,%d", &c);
@@ -288,6 +283,8 @@ void init_window(const int res, const char *wndTitle, void *opaque)
             cfg_lfbWriteMerge = ((i == 1) && c)? 1:cfg_lfbWriteMerge;
             i = sscanf(line, "LfbMapBufo,%d", &c);
             cfg_lfbMapBufo = ((i == 1) && c)? 1:cfg_lfbMapBufo;
+            i = sscanf(line, "Annotate,%d", &c);
+            cfg_Annotate = ((i == 1) && c)? 1:cfg_Annotate;
             i = sscanf(line, "MipMaps,%d", &c);
             cfg_MipMaps = ((i == 1) && c)? 1:cfg_MipMaps;
             i = sscanf(line, "FifoTrace,%d", &c);
@@ -299,18 +296,20 @@ void init_window(const int res, const char *wndTitle, void *opaque)
     }
 
     int gui_height, glide_fullscreen = glide_gui_fullscreen(0, &gui_height);
-    cfg_scaleGuiX = (glide_fullscreen || cfg_scaleX)? 0:cfg_scaleGuiX;
-    cfg_scaleX = (cfg_scaleGuiX && (gui_height > 480) && (gui_height > tblRes[res].h))?
+    cfg_scaleGuiOff = (glide_fullscreen || cfg_scaleX)? 1:cfg_scaleGuiOff;
+    cfg_scaleX = (!cfg_scaleGuiOff && (gui_height > 480) && (gui_height > tblRes[res].h))?
         (int)((1.f * tblRes[res].w * gui_height) / tblRes[res].h):cfg_scaleX;
 
 #define WRAPPER_FLAG_WINDOWED           0x01
 #define WRAPPER_FLAG_MIPMAPS            0x02
+#define WRAPPER_FLAG_ANNOTATE           0x10
 #define WRAPPER_FLAG_FRAMEBUFFER_SRGB   0x20
 #define WRAPPER_FLAG_VSYNCOFF           0x40
 #define WRAPPER_FLAG_QEMU               0x80
     uint32_t flags = (glide_fullscreen)? WRAPPER_FLAG_QEMU:
         (WRAPPER_FLAG_QEMU | WRAPPER_FLAG_WINDOWED);
     flags |= (cfg_MipMaps)? WRAPPER_FLAG_MIPMAPS:0;
+    flags |= (cfg_Annotate)? WRAPPER_FLAG_ANNOTATE:0;
     flags |= (cfg_cntxVsyncOff)? WRAPPER_FLAG_VSYNCOFF:0;
     flags |= (cfg_cntxSRGB)? WRAPPER_FLAG_FRAMEBUFFER_SRGB:0;
     flags |= cfg_cntxMSAA;
@@ -329,12 +328,12 @@ void init_window(const int res, const char *wndTitle, void *opaque)
     if (cfg_createWnd)
         hwnd = CreateGlideWindow(wndTitle, tblRes[sel].w, tblRes[sel].h);
     glide_prepare_window(((tblRes[sel].h & 0x7FFFU) << 0x10) | tblRes[sel].w,
-            disp_cb, &cwnd_glide2x);
+            (cfg_cntxMSAA > 8)? 16:cfg_cntxMSAA, disp_cb, &cwnd_glide2x);
 #endif
 #if (defined(CONFIG_LINUX) && CONFIG_LINUX) || \
     (defined(CONFIG_DARWIN) && CONFIG_DARWIN)
     glide_prepare_window(((tblRes[sel].h & 0x7FFFU) << 0x10) | tblRes[sel].w,
-            disp_cb, &cwnd_glide2x);
+            (cfg_cntxMSAA > 8)? 16:cfg_cntxMSAA, disp_cb, &cwnd_glide2x);
 #endif	
 }
 

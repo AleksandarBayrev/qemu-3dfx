@@ -20,7 +20,6 @@
 
 #include "qemu/osdep.h"
 #include "qemu/timer.h"
-#include "qemu-common.h"
 #include "ui/console.h"
 
 #include "mesagl_impl.h"
@@ -47,9 +46,9 @@ int MGLUpdateGuestBufo(mapbufo_t *bufo, int add)
 
     if (ret && bufo) {
         bufo->lvl = (add)? MapBufObjGpa(bufo):0;
-        kvm_update_guest_pa_range(MBUFO_BASE | (bufo->gpa & ((MBUFO_SIZE - 1) - (qemu_real_host_page_size - 1))),
-            bufo->mapsz + (bufo->hva & (qemu_real_host_page_size - 1)),
-            (void *)(bufo->hva & qemu_real_host_page_mask),
+        kvm_update_guest_pa_range(MBUFO_BASE | (bufo->gpa & ((MBUFO_SIZE - 1) - (qemu_real_host_page_size() - 1))),
+            bufo->mapsz + (bufo->hva & (qemu_real_host_page_size() - 1)),
+            (void *)(bufo->hva & qemu_real_host_page_mask()),
             (bufo->acc & GL_MAP_WRITE_BIT)? 0:1, add);
     }
 
@@ -227,7 +226,7 @@ static Display     *dpy;
 static Window       win;
 static XVisualInfo *xvi;
 static int          xvidmode;
-static const char  *xstr;
+static const char  *xstr, *xcstr;
 static GLXContext   ctx[MAX_LVLCNTX];
 
 static HPBUFFERARB hPbuffer[MAX_PBUFFER];
@@ -303,8 +302,12 @@ static void MesaDisplayModeset(const int modeset)
     switch(modeset) {
         case 1:
             do {
-                int w, h, fullscreen = mesa_gui_fullscreen(&w, &h), modeset = 0, vidCount;
+                int w, h, fullscreen = mesa_gui_fullscreen(&w, &h), scale_x = GetGLScaleWidth(), modeset = 0, vidCount;
                 XF86VidModeModeInfo **vidModes;
+                if (scale_x) {
+                    h = ((1.f * h) / w) * scale_x;
+                    w = scale_x;
+                }
                 if (fullscreen && xvidmode && XF86VidModeGetAllModeLines(dpy, DefaultScreen(dpy), &vidCount, &vidModes)) {
                     int vidRef = (1000.f * vidModes[0]->dotclock) / (vidModes[0]->htotal * vidModes[0]->vtotal);
                     DPRINTF_COND(GLFuncTrace(), "Current %4dx%d %3dHz dotclock %6d",
@@ -381,6 +384,7 @@ void *MesaGLGetProc(const char *proc)
 void MGLTmpContext(void)
 {
     Display *tmpDisp = XOpenDisplay(NULL);
+    xcstr = glXGetClientString(tmpDisp, GLX_VENDOR);
     xstr = glXQueryExtensionsString(tmpDisp, DefaultScreen(tmpDisp));
     if (find_xstr(xstr, "GLX_MESA_swap_control")) {
         xglFuncs.SwapIntervalEXT = (int (*)(unsigned int))
@@ -397,7 +401,7 @@ void MGLTmpContext(void)
 
 void MGLDeleteContext(int level)
 {
-    int n = (level >= MAX_LVLCNTX)? (MAX_LVLCNTX - 1):level;
+    int n = (level)? ((level % MAX_LVLCNTX)? (level % MAX_LVLCNTX):1):level;
     glXMakeContextCurrent(dpy, None, None, NULL);
     if (n == 0) {
         for (int i = MAX_LVLCNTX; i > 1;) {
@@ -410,7 +414,7 @@ void MGLDeleteContext(int level)
     glXDestroyContext(dpy, ctx[n]);
     ctx[n] = 0;
     if (!n)
-        MGLActivateHandler(0);
+        MGLActivateHandler(0, 0);
 }
 
 void MGLWndRelease(void)
@@ -450,7 +454,8 @@ int MGLCreateContext(uint32_t gDC)
 
 int MGLMakeCurrent(uint32_t cntxRC, int level)
 {
-    uint32_t i = cntxRC & (MAX_PBUFFER - 1), n = (level >= MAX_LVLCNTX)? (MAX_LVLCNTX - 1):level;
+    int n = (level)? ((level % MAX_LVLCNTX)? (level % MAX_LVLCNTX):1):level;
+    uint32_t i = cntxRC & (MAX_PBUFFER - 1);
     if (cntxRC == (MESAGL_MAGIC - n)) {
         glXMakeContextCurrent(dpy, win, win, ctx[n]);
         InitMesaGLExt();
@@ -467,7 +472,7 @@ int MGLMakeCurrent(uint32_t cntxRC, int level)
             }
         }
         if (!n)
-            MGLActivateHandler(1);
+            MGLActivateHandler(1, 0);
     }
     if (cntxRC == (((MESAGL_MAGIC & 0xFFFFFFFU) << 4) | i))
         glXMakeContextCurrent(dpy, PBDC[i], PBDC[i], PBRC[i]);
@@ -477,17 +482,19 @@ int MGLMakeCurrent(uint32_t cntxRC, int level)
 
 int MGLSwapBuffers(void)
 {
-    MGLActivateHandler(1);
+    MGLActivateHandler(1, 0);
     glXSwapBuffers(dpy, win);
     return 1;
 }
 
 static int MGLPresetPixelFormat(void)
 {
+    const char nvstr[] = "NVIDIA ";
     dpy = XOpenDisplay(NULL);
     wnd_ready = 0;
-    mesa_prepare_window(&cwnd_mesagl);
     ImplMesaGLReset();
+    DPRINTF_COND(GetGLScaleWidth(), "MESAGL window scaled at width %d", GetGLScaleWidth());
+    mesa_prepare_window(GetContextMSAA(), memcmp(xcstr, nvstr, sizeof(nvstr) - 1), GetGLScaleWidth(), &cwnd_mesagl);
 
     int fbid, fbcnt, *attrib = iattribs_fb(dpy, GetContextMSAA());
     GLXFBConfig *fbcnf = glXChooseFBConfig(dpy, DefaultScreen(dpy), attrib, &fbcnt);
@@ -541,18 +548,22 @@ int MGLDescribePixelFormat(int fmt, unsigned int sz, void *p)
     return 1;
 }
 
-void MGLActivateHandler(int i)
+void MGLActivateHandler(const int i, const int d)
 {
-    static int last = 0;
+    static int last;
 
 #define WA_ACTIVE 1
 #define WA_INACTIVE 0
     if (i != last) {
         last = i;
         DPRINTF_COND(GLFuncTrace(), "wm_activate %-32d", i);
-        if (i)
-            MesaDisplayModeset(1);
-        mesa_renderer_stat(i);
+        if (i) {
+            deactivateGuiRefSched();
+            MesaDisplayModeset(i);
+            mesa_renderer_stat(i);
+        }
+        else
+            deactivateSched(d);
     }
 }
 
@@ -706,6 +717,7 @@ void MGLFuncHandler(const char *name)
                         ctx[i] = 0;
                     }
                 }
+                MGLActivateHandler(0, 0);
                 ctx[0] = fp(dpy, fbcnf[0], 0, True, (const int *)&argsp[2]);
                 ret = (ctx[0])? 1:0;
             }
@@ -910,6 +922,9 @@ void MGLFuncHandler(const char *name)
         XF86VidModeSetGammaRamp(dpy, DefaultScreen(dpy), rampsz,
             xRamp.r, xRamp.g, xRamp.b);
         argsp[0] = 1;
+        return;
+    }
+    FUNCP_HANDLER("wglSetDeviceCursor3DFX") {
         return;
     }
 

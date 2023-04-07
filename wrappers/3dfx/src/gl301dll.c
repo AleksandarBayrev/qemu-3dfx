@@ -101,6 +101,18 @@ static int InitGlidePTMMBase(PDRVFUNC pDrv)
     return 0;
 }
 
+static int InhibitDll(void)
+{
+    const char str[] = "InhibitDll,1";
+    char line[16];
+    FILE *fp = fopen("glide.cfg", "r");
+    if (fp != NULL) {
+        fgets(line, sizeof(line), fp);
+        fclose(fp);
+    }
+    return memcmp(line, str, sizeof(str) - 1);
+}
+
 static INLINE void forcedPageIn(const uint32_t addr, const uint32_t size, const char *func)
 {
     int i;
@@ -204,11 +216,12 @@ void PT_CALL grBufferSwap(uint32_t arg0) {
     ret = *pt0;
     if (ret) {
         static uint32_t nexttick;
-        uint32_t t = GetTickCount();
-        nexttick = (nexttick == 0)? t:nexttick;
-        nexttick += 1000/ret;
         while (GetTickCount() < nexttick)
             Sleep(0);
+        nexttick = GetTickCount();
+        while (nexttick >= (UINT32_MAX - (1000 / ret)))
+            nexttick = GetTickCount();
+        nexttick += (1000 / ret);
     }
 }
 void PT_CALL grCheckForRoom(uint32_t arg0) {
@@ -952,7 +965,7 @@ BOOL APIENTRY DllMain( HINSTANCE hModule,
             memcpy(&vgLfb[(SHLFB_SIZE - ALIGNBO(1)) >> 2], buildstr, ALIGNED(1));
 	    ptm[(0xFBCU >> 2)] = (0xA0UL << 12) | GLIDEVER;
 	    HostRet = ptm[(0xFBCU >> 2)];
-	    if (HostRet != ((GLIDEVER << 8) | 0xA0UL)) {
+	    if ((HostRet != ((GLIDEVER << 8) | 0xA0UL)) || !InhibitDll()) {
 		DPRINTF("Error - Glide3x init failed 0x%08x\n", HostRet);
 		return FALSE;
 	    }

@@ -32,13 +32,18 @@ int MGLSwapBuffers(void);
 int MGLChoosePixelFormat(void);
 int MGLDescribePixelFormat(int, unsigned int, void *);
 int MGLSetPixelFormat(int, const void *);
-void MGLActivateHandler(int);
+void MGLActivateHandler(const int, const int);
+void MGLCursorDefine(int, int, int, int, const void *);
+void MGLMouseWarp(const uint32_t);
 int NumPbuffer(void);
 void MGLFuncHandler(const char *);
 void MGLDeleteContext(int);
 int MGLCreateContext(uint32_t);
 
 int glwnd_ready(void);
+void deactivateCancel(void);
+void deactivateSched(const int);
+void deactivateGuiRefSched(void);
 int find_xstr(const char *, const char *);
 
 typedef struct _perfstat {

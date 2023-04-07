@@ -368,12 +368,28 @@ static void InitClientStates(void)
         HeapFree(GetProcessHeap(), 0, str); \
     } while(0)
 
-static void fltrxstr(const char *xstr)
+static FILE * opt_fopen(void)
+{
+#define XSTRCFG "wrapgl32.ext"
+    char cfg_path[MAX_PATH];
+    FILE *ret = NULL;
+    int i;
+    GetModuleFileName(NULL, cfg_path, MAX_PATH);
+    i = strnlen(cfg_path, MAX_PATH);
+    while (i && cfg_path[i] != '\\') i--;
+    if (cfg_path[i] == '\\' && (MAX_PATH - i - 1) > sizeof(XSTRCFG)) {
+        strcpy(&cfg_path[++i], XSTRCFG);
+        ret = fopen(cfg_path, "r");
+    }
+    return ret;
+}
+
+static void fltrxstr(const char *xstr, size_t len)
 {
 #define MAX_XSTR 128
-#define XSTRCFG "wrapgl32.ext"
     char *str = (char *)xstr, *tmp = (char *)&fbtm[(MGLFBT_SIZE - (3*PAGE_SIZE)) >> 2];
-    FILE *f = fopen(XSTRCFG, "r");
+    FILE *f = opt_fopen();
+    len = (len > (3*PAGE_SIZE))? (3*PAGE_SIZE):len;
     *tmp = ' ';
     *(tmp + 1) = '\0';
     if (f) {
@@ -401,31 +417,53 @@ static void fltrxstr(const char *xstr)
         }
         *(--tmp) = '\0';
         fclose(f);
-        strncpy(str, (char *)&fbtm[(MGLFBT_SIZE - (3*PAGE_SIZE)) >> 2], (3*PAGE_SIZE));
+        strncpy(str, (char *)&fbtm[(MGLFBT_SIZE - (3*PAGE_SIZE)) >> 2], len);
     }
 }
 struct mglOptions {
     int bufoAcc;
+    int dispTimerMS;
+    int ovrdSync;
+    int scaleX;
+    int useMSAA;
     int useSRGB;
     int vsyncOff;
     int xstrYear;
 };
+static int swapFps;
+static int parse_value(const char *str, const char *tok, int *val)
+{
+    int ret = (memcmp(str, tok, strlen(tok)))? 0:1;
+    if (ret)
+        *val = strtol(str + strlen(tok), 0, 10);
+    return ret;
+}
 static void parse_options(struct mglOptions *opt)
 {
-    FILE *f = fopen(XSTRCFG, "r");
+    FILE *f = opt_fopen();
     memset(opt, 0, sizeof(struct mglOptions));
     if (f) {
         char line[MAX_XSTR];
         int i, v;
         while(fgets(line, MAX_XSTR, f)) {
-            i = sscanf(line, "BufOAccelEN,%d", &v);
-            opt->bufoAcc = (i == 1)? v:opt->bufoAcc;
-            i = sscanf(line, "ContextSRGB,%d", &v);
-            opt->useSRGB = (i == 1)? v:opt->useSRGB;
-            i = sscanf(line, "ContextVsyncOff,%d", &v);
-            opt->vsyncOff = (i == 1)? v:opt->vsyncOff;
-            i = sscanf(line, "ExtensionsYear,%d", &v);
+            i = parse_value(line, "DispTimerMS,", &v);
+            opt->dispTimerMS = (i == 1)? (0x8000U | (v & 0x7FFFU)):opt->dispTimerMS;
+            i = parse_value(line, "ScaleWidth,", &v);
+            opt->scaleX = (i == 1)? (v & 0x7FFFU):opt->scaleX;
+            i = parse_value(line, "OverrideSync,", &v);
+            opt->ovrdSync = (i == 1)? (v & 0x03U):opt->ovrdSync;
+            i = parse_value(line, "BufOAccelEN,", &v);
+            opt->bufoAcc = ((i == 1) && v)? 1:opt->bufoAcc;
+            i = parse_value(line, "ContextMSAA,", &v);
+            opt->useMSAA = ((i == 1) && v)? ((v & 0x03U) << 2):opt->useMSAA;
+            i = parse_value(line, "ContextSRGB,", &v);
+            opt->useSRGB = ((i == 1) && v)? 1:opt->useSRGB;
+            i = parse_value(line, "ContextVsyncOff,", &v);
+            opt->vsyncOff = ((i == 1) && v)? 1:opt->vsyncOff;
+            i = parse_value(line, "ExtensionsYear,", &v);
             opt->xstrYear = (i == 1)? v:opt->xstrYear;
+            i = parse_value(line, "FpsLimit,", &v);
+            swapFps = (i == 1)? (v & 0x7FU):swapFps;
         }
         fclose(f);
     }
@@ -594,23 +632,23 @@ void PT_CALL glBeginPerfQueryINTEL(uint32_t arg0) {
 }
 void PT_CALL glBeginQuery(uint32_t arg0, uint32_t arg1) {
     pt[1] = arg0; pt[2] = arg1; 
-    pt0 = (uint32_t *)pt[0]; *pt0 = FEnum_glBeginQuery;
+    pt0 = (uint32_t *)pt[0]; FIFO_GLFUNC(FEnum_glBeginQuery, 2);
 }
 void PT_CALL glBeginQueryARB(uint32_t arg0, uint32_t arg1) {
     pt[1] = arg0; pt[2] = arg1; 
-    pt0 = (uint32_t *)pt[0]; *pt0 = FEnum_glBeginQueryARB;
+    pt0 = (uint32_t *)pt[0]; FIFO_GLFUNC(FEnum_glBeginQueryARB, 2);
 }
 void PT_CALL glBeginQueryIndexed(uint32_t arg0, uint32_t arg1, uint32_t arg2) {
     pt[1] = arg0; pt[2] = arg1; pt[3] = arg2; 
-    pt0 = (uint32_t *)pt[0]; *pt0 = FEnum_glBeginQueryIndexed;
+    pt0 = (uint32_t *)pt[0]; FIFO_GLFUNC(FEnum_glBeginQueryIndexed, 3);
 }
 void PT_CALL glBeginTransformFeedback(uint32_t arg0) {
     pt[1] = arg0; 
-    pt0 = (uint32_t *)pt[0]; *pt0 = FEnum_glBeginTransformFeedback;
+    pt0 = (uint32_t *)pt[0]; FIFO_GLFUNC(FEnum_glBeginTransformFeedback, 1);
 }
 void PT_CALL glBeginTransformFeedbackEXT(uint32_t arg0) {
     pt[1] = arg0; 
-    pt0 = (uint32_t *)pt[0]; *pt0 = FEnum_glBeginTransformFeedbackEXT;
+    pt0 = (uint32_t *)pt[0]; FIFO_GLFUNC(FEnum_glBeginTransformFeedbackEXT, 1);
 }
 void PT_CALL glBeginTransformFeedbackNV(uint32_t arg0) {
     pt[1] = arg0; 
@@ -678,7 +716,7 @@ void PT_CALL glBindBufferBaseNV(uint32_t arg0, uint32_t arg1, uint32_t arg2) {
 }
 void PT_CALL glBindBufferOffsetEXT(uint32_t arg0, uint32_t arg1, uint32_t arg2, uint32_t arg3) {
     pt[1] = arg0; pt[2] = arg1; pt[3] = arg2; pt[4] = arg3; 
-    pt0 = (uint32_t *)pt[0]; *pt0 = FEnum_glBindBufferOffsetEXT;
+    pt0 = (uint32_t *)pt[0]; FIFO_GLFUNC(FEnum_glBindBufferOffsetEXT, 4);
 }
 void PT_CALL glBindBufferOffsetNV(uint32_t arg0, uint32_t arg1, uint32_t arg2, uint32_t arg3) {
     pt[1] = arg0; pt[2] = arg1; pt[3] = arg2; pt[4] = arg3; 
@@ -686,11 +724,11 @@ void PT_CALL glBindBufferOffsetNV(uint32_t arg0, uint32_t arg1, uint32_t arg2, u
 }
 void PT_CALL glBindBufferRange(uint32_t arg0, uint32_t arg1, uint32_t arg2, uint32_t arg3, uint32_t arg4) {
     pt[1] = arg0; pt[2] = arg1; pt[3] = arg2; pt[4] = arg3; pt[5] = arg4; 
-    pt0 = (uint32_t *)pt[0]; *pt0 = FEnum_glBindBufferRange;
+    pt0 = (uint32_t *)pt[0]; FIFO_GLFUNC(FEnum_glBindBufferRange, 5);
 }
 void PT_CALL glBindBufferRangeEXT(uint32_t arg0, uint32_t arg1, uint32_t arg2, uint32_t arg3, uint32_t arg4) {
     pt[1] = arg0; pt[2] = arg1; pt[3] = arg2; pt[4] = arg3; pt[5] = arg4; 
-    pt0 = (uint32_t *)pt[0]; *pt0 = FEnum_glBindBufferRangeEXT;
+    pt0 = (uint32_t *)pt[0]; FIFO_GLFUNC(FEnum_glBindBufferRangeEXT, 5);
 }
 void PT_CALL glBindBufferRangeNV(uint32_t arg0, uint32_t arg1, uint32_t arg2, uint32_t arg3, uint32_t arg4) {
     pt[1] = arg0; pt[2] = arg1; pt[3] = arg2; pt[4] = arg3; pt[5] = arg4; 
@@ -1041,13 +1079,17 @@ void PT_CALL glBufferData(uint32_t arg0, uint32_t arg1, uint32_t arg2, uint32_t 
     if (arg2)
         FBTMMCPY(&fbtm[(MGLFBT_SIZE - ALIGNED(arg1)) >> 2], (unsigned char *)arg2, arg1);
     pt[1] = arg0; pt[2] = arg1; pt[3] = arg2; pt[4] = arg3; 
-    pt0 = (uint32_t *)pt[0]; *pt0 = FEnum_glBufferData;
+    pt0 = (uint32_t *)pt[0]; /**pt0 = FEnum_glBufferData;*/
+    if (!arg2) { FIFO_GLFUNC(FEnum_glBufferData, 4); }
+    else *pt0 = FEnum_glBufferData;
 }
 void PT_CALL glBufferDataARB(uint32_t arg0, uint32_t arg1, uint32_t arg2, uint32_t arg3) {
     if (arg2)
         FBTMMCPY(&fbtm[(MGLFBT_SIZE - ALIGNED(arg1)) >> 2], (unsigned char *)arg2, arg1);
     pt[1] = arg0; pt[2] = arg1; pt[3] = arg2; pt[4] = arg3; 
-    pt0 = (uint32_t *)pt[0]; *pt0 = FEnum_glBufferDataARB;
+    pt0 = (uint32_t *)pt[0]; /**pt0 = FEnum_glBufferDataARB;*/
+    if (!arg2) { FIFO_GLFUNC(FEnum_glBufferDataARB, 4); }
+    else *pt0 = FEnum_glBufferDataARB;
 }
 void PT_CALL glBufferPageCommitmentARB(uint32_t arg0, uint32_t arg1, uint32_t arg2, uint32_t arg3) {
     pt[1] = arg0; pt[2] = arg1; pt[3] = arg2; pt[4] = arg3; 
@@ -1061,7 +1103,9 @@ void PT_CALL glBufferStorage(uint32_t arg0, uint32_t arg1, uint32_t arg2, uint32
     if (arg2)
         FBTMMCPY(&fbtm[(MGLFBT_SIZE - ALIGNED(arg1)) >> 2], (unsigned char *)arg2, arg1);
     pt[1] = arg0; pt[2] = arg1; pt[3] = arg2; pt[4] = arg3; 
-    pt0 = (uint32_t *)pt[0]; *pt0 = FEnum_glBufferStorage;
+    pt0 = (uint32_t *)pt[0]; /**pt0 = FEnum_glBufferStorage;*/
+    if (!arg2) { FIFO_GLFUNC(FEnum_glBufferStorage, 4); }
+    else *pt0 = FEnum_glBufferStorage;
 }
 void PT_CALL glBufferStorageExternalEXT(uint32_t arg0, uint32_t arg1, uint32_t arg2, uint32_t arg3, uint32_t arg4) {
     pt[1] = arg0; pt[2] = arg1; pt[3] = arg2; pt[4] = arg3; pt[5] = arg4; 
@@ -2556,7 +2600,7 @@ void PT_CALL glDisableVertexAttribArrayARB(uint32_t arg0) {
 }
 void PT_CALL glDisablei(uint32_t arg0, uint32_t arg1) {
     pt[1] = arg0; pt[2] = arg1; 
-    pt0 = (uint32_t *)pt[0]; *pt0 = FEnum_glDisablei;
+    pt0 = (uint32_t *)pt[0]; FIFO_GLFUNC(FEnum_glDisablei, 2);
 }
 void PT_CALL glDispatchCompute(uint32_t arg0, uint32_t arg1, uint32_t arg2) {
     pt[1] = arg0; pt[2] = arg1; pt[3] = arg2; 
@@ -3166,7 +3210,7 @@ void PT_CALL glEnableVertexAttribArrayARB(uint32_t arg0) {
 }
 void PT_CALL glEnablei(uint32_t arg0, uint32_t arg1) {
     pt[1] = arg0; pt[2] = arg1; 
-    pt0 = (uint32_t *)pt[0]; *pt0 = FEnum_glEnablei;
+    pt0 = (uint32_t *)pt[0]; FIFO_GLFUNC(FEnum_glEnablei, 2);
 }
 void PT_CALL glEnd(void) {
     
@@ -3206,23 +3250,23 @@ void PT_CALL glEndPerfQueryINTEL(uint32_t arg0) {
 }
 void PT_CALL glEndQuery(uint32_t arg0) {
     pt[1] = arg0; 
-    pt0 = (uint32_t *)pt[0]; *pt0 = FEnum_glEndQuery;
+    pt0 = (uint32_t *)pt[0]; FIFO_GLFUNC(FEnum_glEndQuery, 1);
 }
 void PT_CALL glEndQueryARB(uint32_t arg0) {
     pt[1] = arg0; 
-    pt0 = (uint32_t *)pt[0]; *pt0 = FEnum_glEndQueryARB;
+    pt0 = (uint32_t *)pt[0]; FIFO_GLFUNC(FEnum_glEndQueryARB, 1);
 }
 void PT_CALL glEndQueryIndexed(uint32_t arg0, uint32_t arg1) {
     pt[1] = arg0; pt[2] = arg1; 
-    pt0 = (uint32_t *)pt[0]; *pt0 = FEnum_glEndQueryIndexed;
+    pt0 = (uint32_t *)pt[0]; FIFO_GLFUNC(FEnum_glEndQueryIndexed, 2);
 }
 void PT_CALL glEndTransformFeedback(void) {
     
-    pt0 = (uint32_t *)pt[0]; *pt0 = FEnum_glEndTransformFeedback;
+    pt0 = (uint32_t *)pt[0]; FIFO_GLFUNC(FEnum_glEndTransformFeedback, 0);
 }
 void PT_CALL glEndTransformFeedbackEXT(void) {
     
-    pt0 = (uint32_t *)pt[0]; *pt0 = FEnum_glEndTransformFeedbackEXT;
+    pt0 = (uint32_t *)pt[0]; FIFO_GLFUNC(FEnum_glEndTransformFeedbackEXT, 0);
 }
 void PT_CALL glEndTransformFeedbackNV(void) {
     
@@ -4425,6 +4469,9 @@ void PT_CALL glGetIntegerv(uint32_t arg0, uint32_t arg1) {
     pt0 = (uint32_t *)pt[0]; *pt0 = FEnum_glGetIntegerv;
     fifoOutData(0, (uint32_t)&n, sizeof(uint32_t));
     fifoOutData(ALIGNED(sizeof(int)), arg1, n*sizeof(int));
+    if ((arg0 == GL_NUM_EXTENSIONS) &&
+        !memcmp(vernstr, "4.1 Metal", strlen("4.1 Metal")))
+        *((int *)arg1) += 1;
 }
 void PT_CALL glGetInternalformatSampleivNV(uint32_t arg0, uint32_t arg1, uint32_t arg2, uint32_t arg3, uint32_t arg4, uint32_t arg5) {
     pt[1] = arg0; pt[2] = arg1; pt[3] = arg2; pt[4] = arg3; pt[5] = arg4; pt[6] = arg5; 
@@ -5293,13 +5340,21 @@ uint8_t * PT_CALL glGetString(uint32_t arg0) {
     pt0 = (uint32_t *)pt[0]; *pt0 = FEnum_glGetString;
     fifoOutData(0, (uint32_t)cstrTbl[sel], cstrsz[sel]);
     if (sel == 0x03U)
-        fltrxstr(cstrTbl[sel]);
+        fltrxstr(cstrTbl[sel], cstrsz[sel]);
     //DPRINTF("%s [ %04x ]", cstrTbl[sel], arg0);
     return (uint8_t *)cstrTbl[sel];
 }
 uint8_t * PT_CALL glGetStringi(uint32_t arg0, uint32_t arg1) {
     static char str[256];
-    uint32_t n;
+    uint32_t n, nexts;
+    if ((arg0 == GL_EXTENSIONS) &&
+        !memcmp(vernstr, "4.1 Metal", strlen("4.1 Metal"))) {
+        glGetIntegerv(GL_NUM_EXTENSIONS, (uint32_t)&nexts);
+        if (arg1 == (nexts - 1)) {
+            strcpy(str, "GL_ARB_debug_output");
+            return (uint8_t *)str;
+        }
+    }
     pt[1] = arg0; pt[2] = arg1; 
     pt0 = (uint32_t *)pt[0]; *pt0 = FEnum_glGetStringi;
     fifoOutData(0, (uint32_t)&n, sizeof(int));
@@ -5517,12 +5572,32 @@ void PT_CALL glGetTrackMatrixivNV(uint32_t arg0, uint32_t arg1, uint32_t arg2, u
     pt0 = (uint32_t *)pt[0]; *pt0 = FEnum_glGetTrackMatrixivNV;
 }
 void PT_CALL glGetTransformFeedbackVarying(uint32_t arg0, uint32_t arg1, uint32_t arg2, uint32_t arg3, uint32_t arg4, uint32_t arg5, uint32_t arg6) {
+    uint32_t n, e;
     pt[1] = arg0; pt[2] = arg1; pt[3] = arg2; pt[4] = arg3; pt[5] = arg4; pt[6] = arg5; pt[7] = arg6; 
     pt0 = (uint32_t *)pt[0]; *pt0 = FEnum_glGetTransformFeedbackVarying;
+    fifoOutData(0, (uint32_t)&n, sizeof(uint32_t));
+    fifoOutData(2*ALIGNED(1), (uint32_t)&e, sizeof(uint32_t));
+    if (e) {
+        if (arg3)
+            memcpy((char *)arg3, &n, sizeof(uint32_t));
+        memcpy((char *)arg5, &e, sizeof(uint32_t));
+        fifoOutData(ALIGNED(1), arg4, sizeof(uint32_t));
+        fifoOutData(3*ALIGNED(1), arg6, ((n + 1) > arg2)? arg2:(n + 1));
+    }
 }
 void PT_CALL glGetTransformFeedbackVaryingEXT(uint32_t arg0, uint32_t arg1, uint32_t arg2, uint32_t arg3, uint32_t arg4, uint32_t arg5, uint32_t arg6) {
+    uint32_t n, e;
     pt[1] = arg0; pt[2] = arg1; pt[3] = arg2; pt[4] = arg3; pt[5] = arg4; pt[6] = arg5; pt[7] = arg6; 
     pt0 = (uint32_t *)pt[0]; *pt0 = FEnum_glGetTransformFeedbackVaryingEXT;
+    fifoOutData(0, (uint32_t)&n, sizeof(uint32_t));
+    fifoOutData(2*ALIGNED(1), (uint32_t)&e, sizeof(uint32_t));
+    if (e) {
+        if (arg3)
+            memcpy((char *)arg3, &n, sizeof(uint32_t));
+        memcpy((char *)arg5, &e, sizeof(uint32_t));
+        fifoOutData(ALIGNED(1), arg4, sizeof(uint32_t));
+        fifoOutData(3*ALIGNED(1), arg6, ((n + 1) > arg2)? arg2:(n + 1));
+    }
 }
 void PT_CALL glGetTransformFeedbackVaryingNV(uint32_t arg0, uint32_t arg1, uint32_t arg2) {
     pt[1] = arg0; pt[2] = arg1; pt[3] = arg2; 
@@ -8200,7 +8275,7 @@ void PT_CALL glPathTexGenNV(uint32_t arg0, uint32_t arg1, uint32_t arg2, uint32_
 }
 void PT_CALL glPauseTransformFeedback(void) {
     
-    pt0 = (uint32_t *)pt[0]; *pt0 = FEnum_glPauseTransformFeedback;
+    pt0 = (uint32_t *)pt[0]; FIFO_GLFUNC(FEnum_glPauseTransformFeedback, 0);
 }
 void PT_CALL glPauseTransformFeedbackNV(void) {
     
@@ -10005,41 +10080,43 @@ void PT_CALL glShaderOp3EXT(uint32_t arg0, uint32_t arg1, uint32_t arg2, uint32_
 }
 void PT_CALL glShaderSource(uint32_t arg0, uint32_t arg1, uint32_t arg2, uint32_t arg3) {
     int i;
+    const int strz[2] = { 0, 0 };
     char **str = (char **)arg2;
-    static const uint32_t send[2] = {0, 0};
     if (arg3) {
         int *len = (int *)arg3;
-        fifoAddData(0, arg3, ALIGNED(arg1*sizeof(int)));
+        fifoAddData(0, arg3, ALIGNED((arg1 * sizeof(uint32_t))));
         for (i = 0; i < arg1; i++) {
-            fifoAddData(0, (uint32_t)str[i], (len[i])? ALIGNED(len[i]):ALIGNED(strlen(str[i])));
-            fifoAddData(0, (uint32_t)send, ALIGNED(1));
+            fifoAddData(0, (uint32_t)str[i], (len[i] > 0)? ALIGNED(len[i]):ALIGNED(strlen(str[i])));
+            fifoAddData(0, (uint32_t)strz, ALIGNED(1));
         }
     }
     else {
         for (i = 0; i < arg1; i++)
             fifoAddData(0, (uint32_t)str[i], ALIGNED((strlen(str[i]) + 1)));
     }
+    fifoAddData(0, arg2, (arg1 * ALIGNED(1)));
     pt[1] = arg0; pt[2] = arg1; pt[3] = arg2; pt[4] = arg3; 
-    pt0 = (uint32_t *)pt[0]; *pt0 = FEnum_glShaderSource;
+    pt0 = (uint32_t *)pt[0]; FIFO_GLFUNC(FEnum_glShaderSource, 4);
 }
 void PT_CALL glShaderSourceARB(uint32_t arg0, uint32_t arg1, uint32_t arg2, uint32_t arg3) {
     int i;
+    const int strz[2] = { 0, 0 };
     char **str = (char **)arg2;
-    static const uint32_t send[2] = {0, 0};
     if (arg3) {
         int *len = (int *)arg3;
         fifoAddData(0, arg3, ALIGNED(arg1*sizeof(int)));
         for (i = 0; i < arg1; i++) {
-            fifoAddData(0, (uint32_t)str[i], (len[i])? ALIGNED(len[i]):ALIGNED(strlen(str[i])));
-            fifoAddData(0, (uint32_t)send, ALIGNED(1));
+            fifoAddData(0, (uint32_t)str[i], (len[i] > 0)? ALIGNED(len[i]):ALIGNED(strlen(str[i])));
+            fifoAddData(0, (uint32_t)strz, ALIGNED(1));
         }
     }
     else {
         for (i = 0; i < arg1; i++)
             fifoAddData(0, (uint32_t)str[i], ALIGNED((strlen(str[i]) + 1)));
     }
+    fifoAddData(0, arg2, ALIGNED((arg1 * sizeof(uint32_t))));
     pt[1] = arg0; pt[2] = arg1; pt[3] = arg2; pt[4] = arg3; 
-    pt0 = (uint32_t *)pt[0]; *pt0 = FEnum_glShaderSourceARB;
+    pt0 = (uint32_t *)pt[0]; FIFO_GLFUNC(FEnum_glShaderSourceARB, 4);
 }
 void PT_CALL glShaderStorageBlockBinding(uint32_t arg0, uint32_t arg1, uint32_t arg2) {
     pt[1] = arg0; pt[2] = arg1; pt[3] = arg2; 
@@ -11171,7 +11248,7 @@ void PT_CALL glTextureSubImage3DEXT(uint32_t arg0, uint32_t arg1, uint32_t arg2,
 }
 void PT_CALL glTextureView(uint32_t arg0, uint32_t arg1, uint32_t arg2, uint32_t arg3, uint32_t arg4, uint32_t arg5, uint32_t arg6, uint32_t arg7) {
     pt[1] = arg0; pt[2] = arg1; pt[3] = arg2; pt[4] = arg3; pt[5] = arg4; pt[6] = arg5; pt[7] = arg6; pt[8] = arg7; 
-    pt0 = (uint32_t *)pt[0]; *pt0 = FEnum_glTextureView;
+    pt0 = (uint32_t *)pt[0]; FIFO_GLFUNC(FEnum_glTextureView, 8);
 }
 void PT_CALL glTrackMatrixNV(uint32_t arg0, uint32_t arg1, uint32_t arg2, uint32_t arg3) {
     pt[1] = arg0; pt[2] = arg1; pt[3] = arg2; pt[4] = arg3; 
@@ -11194,12 +11271,22 @@ void PT_CALL glTransformFeedbackStreamAttribsNV(uint32_t arg0, uint32_t arg1, ui
     pt0 = (uint32_t *)pt[0]; *pt0 = FEnum_glTransformFeedbackStreamAttribsNV;
 }
 void PT_CALL glTransformFeedbackVaryings(uint32_t arg0, uint32_t arg1, uint32_t arg2, uint32_t arg3) {
+    uint32_t i;
+    char **varys = (char **)arg2;
+    for (i = 0; i < arg1; i++)
+        fifoAddData(0, (uint32_t)varys[i], ALIGNED((strlen(varys[i] + 1))));
+    fifoAddData(0, arg2, ALIGNED((arg1 * sizeof(uint32_t))));
     pt[1] = arg0; pt[2] = arg1; pt[3] = arg2; pt[4] = arg3; 
-    pt0 = (uint32_t *)pt[0]; *pt0 = FEnum_glTransformFeedbackVaryings;
+    pt0 = (uint32_t *)pt[0]; FIFO_GLFUNC(FEnum_glTransformFeedbackVaryings, 4);
 }
 void PT_CALL glTransformFeedbackVaryingsEXT(uint32_t arg0, uint32_t arg1, uint32_t arg2, uint32_t arg3) {
+    uint32_t i;
+    char **varys = (char **)arg2;
+    for (i = 0; i < arg1; i++)
+        fifoAddData(0, (uint32_t)varys[i], ALIGNED((strlen(varys[i] + 1))));
+    fifoAddData(0, arg2, ALIGNED((arg1 * sizeof(uint32_t))));
     pt[1] = arg0; pt[2] = arg1; pt[3] = arg2; pt[4] = arg3; 
-    pt0 = (uint32_t *)pt[0]; *pt0 = FEnum_glTransformFeedbackVaryingsEXT;
+    pt0 = (uint32_t *)pt[0]; FIFO_GLFUNC(FEnum_glTransformFeedbackVaryingsEXT, 4);
 }
 void PT_CALL glTransformFeedbackVaryingsNV(uint32_t arg0, uint32_t arg1, uint32_t arg2, uint32_t arg3) {
     pt[1] = arg0; pt[2] = arg1; pt[3] = arg2; pt[4] = arg3; 
@@ -16366,6 +16453,7 @@ static uint32_t PT_CALL wglGetExtensionsStringARB(uint32_t arg0)
     WGL_FUNCP("wglGetExtensionsStringARB");
     ptm[0xFDC >> 2] = MESAGL_MAGIC;
     strncpy((char *)wstrtbl[0], (char *)&mfifo[(MGLSHM_SIZE - PAGE_SIZE) >> 2], PAGE_SIZE);
+    fltrxstr(wstrtbl[0], PAGE_SIZE - 1);
     //DPRINTF("GetExtensionsStringARB %s", wstrtbl[0]);
     return (uint32_t)wstrtbl[0];
 }
@@ -16462,8 +16550,7 @@ wglCreateContextAttribsARB(HDC hDC,
   if (ret) {
       if (currGLRC && hShareContext) {
           level++;
-          if (level == MAX_LVLCNTX)
-              level--;
+          level = (level % MAX_LVLCNTX)? (level % MAX_LVLCNTX):1;
       }
       else {
           currDC = (uint32_t)hDC;
@@ -16615,6 +16702,49 @@ wglSetDeviceGammaRamp3DFX(HDC hdc, LPVOID arrays)
     return ret;
 }
 
+static void WINAPI
+wglSetDeviceCursor3DFX(HCURSOR hCursor)
+{
+    ICONINFO ic;
+    BOOL (WINAPI *p_DeleteObject)(HANDLE) = (BOOL (WINAPI *)(HANDLE))
+        GetProcAddress(GetModuleHandle("gdi32.dll"), "DeleteObject");
+    int (WINAPI *p_GetDIBits)(HDC, HBITMAP, UINT, UINT, LPVOID, LPBITMAPINFO, UINT) =
+        (int (WINAPI *)(HDC, HBITMAP, UINT, UINT, LPVOID, LPBITMAPINFO, UINT))
+        GetProcAddress(GetModuleHandle("gdi32.dll"), "GetDIBits");
+    memset(&ic, 0, sizeof(ICONINFO));
+    if (p_GetDIBits && hCursor && GetIconInfo(hCursor, &ic) && !ic.fIcon) {
+#define SIZE_BMPINFO (sizeof(BITMAPINFOHEADER) + sizeof(RGBQUAD[3]))
+        unsigned char binfo[SIZE_BMPINFO];
+        BITMAPINFO *pbmi = (BITMAPINFO *)binfo;
+        HDC hdc = GetDC(GLwnd);
+        memset(pbmi, 0, SIZE_BMPINFO);
+        pbmi->bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        pbmi->bmiHeader.biPlanes = 1;
+        if (hdc && ic.hbmColor && p_GetDIBits(hdc, ic.hbmColor, 0, 0, NULL, pbmi, DIB_RGB_COLORS) &&
+            (pbmi->bmiHeader.biSizeImage == (32 * 32 * sizeof(uint32_t))) &&
+            (pbmi->bmiHeader.biBitCount == 32) &&
+            (pbmi->bmiHeader.biWidth > ic.xHotspot) &&
+            (pbmi->bmiHeader.biHeight > ic.yHotspot)) {
+            WGL_FUNCP("wglSetDeviceCursor3DFX");
+            argsp[0] = ic.xHotspot;
+            argsp[1] = ic.yHotspot;
+            argsp[2] = pbmi->bmiHeader.biWidth;
+            argsp[3] = pbmi->bmiHeader.biHeight;
+            pbmi->bmiHeader.biHeight = 0 - pbmi->bmiHeader.biHeight;
+            p_GetDIBits(hdc, ic.hbmColor, 0, argsp[3],
+                &fbtm[(MGLFBT_SIZE - pbmi->bmiHeader.biSizeImage) >> 2],
+                pbmi, DIB_RGB_COLORS);
+            ptm[0xFDC >> 2] = MESAGL_MAGIC;
+        }
+    }
+    if (p_DeleteObject) {
+        if (ic.hbmColor)
+            p_DeleteObject(ic.hbmColor);
+        if (ic.hbmMask)
+            p_DeleteObject(ic.hbmMask);
+    }
+}
+
 static void HookPatchGamma(const uint32_t start, const uint32_t *iat, const DWORD range)
 {
     DWORD oldProt;
@@ -16736,6 +16866,7 @@ mglGetProcAddress (uint32_t arg0)
     /* WGL_3DFX_gamma_control */
     FUNC_WGL_EXT(wglGetDeviceGammaRamp3DFX);
     FUNC_WGL_EXT(wglSetDeviceGammaRamp3DFX);
+    FUNC_WGL_EXT(wglSetDeviceCursor3DFX);
     /* GL_ARB_debug_output */
     FUNC_WGL_EXT(glDebugMessageCallbackARB);
     FUNC_WGL_EXT(glDebugMessageControlARB);
@@ -16783,22 +16914,21 @@ mglMakeCurrent (uint32_t arg0, uint32_t arg1)
     if (!currDC && !mglCreateContext(arg0))
         return 0;
     //DPRINTF("MakeCurrent %x %x", arg0, arg1);
-    struct mglOptions cfg;
-    parse_options(&cfg);
-    if (cfg.bufoAcc && !currGLRC) {
-        const uint32_t bufoAcc = 0xbf0acc;
-        glDebugMessageInsertARB(GL_DEBUG_SOURCE_API_ARB, GL_DEBUG_TYPE_PERFORMANCE_ARB,
-            GL_DEBUG_SEVERITY_LOW_ARB, -1, sizeof(uint32_t), (uint32_t)&bufoAcc);
-    }
     ptVer[0] = arg1;
     memcpy((char *)&ptVer[1], rev_, 8);
     memcpy(((char *)&ptVer[1] + 8), icdBuild, sizeof(icdBuild));
     ptm[0xFF8 >> 2] = MESAGL_MAGIC;
     if (!currGLRC) {
+        struct mglOptions cfg;
+        parse_options(&cfg);
         if (cfg.useSRGB && !glIsEnabled(GL_FRAMEBUFFER_SRGB))
             glEnable(GL_FRAMEBUFFER_SRGB);
-        if (cfg.vsyncOff && wglGetSwapIntervalEXT())
-            wglSwapIntervalEXT(0);
+        if (cfg.vsyncOff) {
+            if (wglGetSwapIntervalEXT())
+                wglSwapIntervalEXT(0);
+        }
+        else if (cfg.ovrdSync && (cfg.ovrdSync != wglGetSwapIntervalEXT()))
+            wglSwapIntervalEXT(cfg.ovrdSync);
         DPRINTF("%s", icdBuild);
     }
     currGLRC = (level && ((arg1 + level) == MESAGL_MAGIC))?
@@ -16896,16 +17026,46 @@ uint32_t PT_CALL mglUseFontOutlinesW(uint32_t arg0, uint32_t arg1, uint32_t arg2
 
 int WINAPI wglSwapBuffers (HDC hdc)
 {
+    static POINT last_pos;
+    static uint32_t timestamp;
     uint32_t ret, *swapRet = &mfifo[(MGLSHM_SIZE - ALIGNED(1)) >> 2];
+    uint32_t t = GetTickCount();
+    CURSORINFO ci = { .cbSize = sizeof(CURSORINFO) };
+    if (((t - timestamp) > (1000/60)) && GetCursorInfo(&ci)) {
+        if (ci.flags != CURSOR_SHOWING)
+            memset(&last_pos, 0, sizeof(POINT));
+        else {
+            RECT wr, cr;
+            timestamp = t;
+            GetWindowRect(WindowFromDC(hdc), &wr);
+            GetClientRect(WindowFromDC(hdc), &cr);
+            int top = (wr.bottom - wr.top) - cr.bottom;
+            ci.ptScreenPos.y = (ci.ptScreenPos.y > top)? (ci.ptScreenPos.y - top):0;
+            if ((ci.ptScreenPos.x < (wr.right - wr.left)) ||
+                (ci.ptScreenPos.y < (wr.bottom - wr.top))) {
+                ci.ptScreenPos.x = MulDiv(ci.ptScreenPos.x, GetSystemMetrics(SM_CXSCREEN) - 1,
+                        (wr.right - wr.left - 1));
+                ci.ptScreenPos.y = MulDiv(ci.ptScreenPos.y, GetSystemMetrics(SM_CYSCREEN) - 1,
+                        (wr.bottom - wr.top - 1));
+                memcpy(&last_pos, &ci.ptScreenPos, sizeof(POINT));
+            }
+        }
+    }
+#define CURSOR_DWORD(d,p) \
+    d = ((p.x & 0x7FFFU) << 16) | (p.y & 0x7FFFU)
+    CURSOR_DWORD(swapRet[1], last_pos);
+    swapRet[0] = swapFps;
     ptm[0xFF0 >> 2] = MESAGL_MAGIC;
     ret = swapRet[0];
-    if (ret & 0x3F00U) {
+    if (ret & 0xFEU) {
         static uint32_t nexttick;
-        uint32_t t = GetTickCount();
-        nexttick = (nexttick == 0)? t:nexttick;
-        nexttick += 1000/((ret & 0x3F00U) >> 8);
+        const uint32_t maxFPS = (ret >> 1) & 0x7FU;
         while (GetTickCount() < nexttick)
             Sleep(0);
+        nexttick = GetTickCount();
+        while (nexttick >= (UINT32_MAX - (1000 / maxFPS)))
+            nexttick = GetTickCount();
+        nexttick += (1000 / maxFPS);
     }
     return (ret & 0x01U);
 }
@@ -16918,7 +17078,11 @@ int WINAPI wglChoosePixelFormat(HDC hdc, const PIXELFORMATDESCRIPTOR *ppfd)
 {
     uint32_t ret, ready = 0;
     uint32_t *xppfd = &mfifo[(MGLSHM_SIZE - PAGE_SIZE) >> 2];
-    memcpy(xppfd, ppfd, sizeof(PIXELFORMATDESCRIPTOR));
+    struct mglOptions cfg;
+    parse_options(&cfg);
+    xppfd[0] = (cfg.scaleX << 16) | cfg.useMSAA | cfg.bufoAcc;
+    xppfd[1] = (cfg.dispTimerMS & 0x8000U)? (cfg.dispTimerMS & 0x7FFFU):DISPTMR_DEFAULT;
+    memcpy(&xppfd[2], ppfd, sizeof(PIXELFORMATDESCRIPTOR));
     ptm[0xFEC >> 2] = MESAGL_MAGIC;
     while (!ready)
         ready = ptm[0xFB8 >> 2];
@@ -16933,14 +17097,20 @@ int WINAPI wglDescribePixelFormat(HDC hdc, int iPixelFormat, UINT nBytes, LPPIXE
 {
     uint32_t ret;
     uint32_t *xppfd = &mfifo[(MGLSHM_SIZE - PAGE_SIZE) >> 2];
-    xppfd[0] = iPixelFormat;
-    xppfd[1] = nBytes;
+    struct mglOptions cfg;
+    parse_options(&cfg);
+    xppfd[0] = (cfg.scaleX << 16) | cfg.useMSAA | cfg.bufoAcc;
+    xppfd[1] = (cfg.dispTimerMS & 0x8000U)? (cfg.dispTimerMS & 0x7FFFU):DISPTMR_DEFAULT;
+    xppfd[2] = iPixelFormat;
+    xppfd[3] = nBytes;
     ptm[0xFE8 >> 2] = MESAGL_MAGIC;
     ret = ptm[0xFE8 >> 2];
     if (ret && ppfd) {
         memcpy(ppfd, xppfd, nBytes);
     }
-    return ret;
+    if ((nBytes == sizeof(int)) && ppfd)
+        *(int *)ppfd = ret;
+    return (ret)? 1:0;
 }
 int WINAPI COMPACT
 wgdDescribePixelFormat(HDC hdc, int iPixelFormat, UINT nBytes, LPPIXELFORMATDESCRIPTOR ppfd)
@@ -16948,7 +17118,14 @@ wgdDescribePixelFormat(HDC hdc, int iPixelFormat, UINT nBytes, LPPIXELFORMATDESC
 
 int WINAPI wglGetPixelFormat(HDC hdc)
 {
-    return (currPixFmt == 0)? 0:wgdDescribePixelFormat(hdc, 1, 0, 0);
+    static int fmt;
+    if (currPixFmt) {
+        if (!fmt)
+            wgdDescribePixelFormat(hdc, 1, sizeof(int), (LPPIXELFORMATDESCRIPTOR)&fmt);
+    }
+    else
+        fmt = 0;
+    return fmt;
 }
 int WINAPI COMPACT
 wgdGetPixelFormat(HDC hdc) { return wglGetPixelFormat(hdc); }

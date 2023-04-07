@@ -778,14 +778,23 @@ static HINSTANCE hDll = 0;
     (defined(CONFIG_DARWIN) && CONFIG_DARWIN)
 static void *hDll = 0;
 #endif
-void __stdcall (*setConfig)(const uint32_t flag);
-void __stdcall (*setConfigRes)(const int res);
+void __stdcall (*setConfig)(const uint32_t flags, void *magic);
+void __stdcall (*setConfigRes)(const int res, void *swap12);
+static int SDLSignValid(const uint32_t sign)
+{
+    static uint32_t SDLSign;
+    SDLSign = (sign)? sign:SDLSign;
+    return (SDLSign == 0x324c4453/*'SDL2'*/);
+}
 void conf_glide2x(const uint32_t flags, const int res)
 {
+    uint32_t sign = 0x58326724 /*'$g2X'*/;
     if (setConfig)
-        (*setConfig)(flags);
-    if (res && setConfigRes)
-        (*setConfigRes)(res);
+        setConfig(flags, &sign);
+    if (setConfigRes)
+        setConfigRes(res, 0);
+    if (sign)
+        SDLSignValid(sign);
 }
 
 void cwnd_glide2x(void *swnd, void *nwnd, void *opaque)
@@ -798,13 +807,7 @@ void cwnd_glide2x(void *swnd, void *nwnd, void *opaque)
         void (__stdcall *SstWinClose3x)(uintptr_t arg0);
     } GrWndFunc;
 
-#if defined(CONFIG_WIN32) && CONFIG_WIN32
-    uintptr_t wnd = othr_hwnd()? (uintptr_t)swnd:(uintptr_t)nwnd;
-#endif
-#if (defined(CONFIG_LINUX) && CONFIG_LINUX) || \
-    (defined(CONFIG_DARWIN) && CONFIG_DARWIN)
-    uintptr_t wnd = othr_hwnd()? (uintptr_t)nwnd:(uintptr_t)swnd;
-#endif
+    uintptr_t wnd = SDLSignValid(0)? (uintptr_t)swnd:(uintptr_t)nwnd;
     window_cb *s = opaque;
 
     switch (s->FEnum) {
@@ -864,8 +867,8 @@ int init_glide2x(const char *dllname)
         const char *libname = strcat(prefix, dllname);
         hDll = LoadLibrary(libname);
     }
-    setConfig = (void *)(GetProcAddress(hDll, "_setConfig@4"));
-    setConfigRes = (void *)(GetProcAddress(hDll, "_setConfigRes@4"));
+    setConfig = (void (*)(const uint32_t, void *))GetProcAddress(hDll, "_setConfig@8");
+    setConfigRes = (void (*)(const int, void *))GetProcAddress(hDll, "_setConfigRes@8");
 #endif
 #if (defined(CONFIG_LINUX) && CONFIG_LINUX) || \
     (defined(CONFIG_DARWIN) && CONFIG_DARWIN)
@@ -888,8 +891,8 @@ int init_glide2x(const char *dllname)
 #endif
         enWrap3x = 1;
     }
-    setConfig = (void *)(dlsym(hDll, "setConfig"));
-    setConfigRes = (void *)(dlsym(hDll, "setConfigRes"));
+    setConfig = (void (*)(const uint32_t, void *))dlsym(hDll, "setConfig");
+    setConfigRes = (void (*)(const int, void *))dlsym(hDll, "setConfigRes");
 #endif
     
     if (!hDll) {

@@ -20,7 +20,6 @@
 
 #include "qemu/osdep.h"
 #include "qemu/timer.h"
-#include "qemu-common.h"
 #include "ui/console.h"
 
 #include "mesagl_impl.h"
@@ -35,6 +34,21 @@
 #include <GL/gl.h>
 #include <GL/wglext.h>
 #include "sysemu/whpx.h"
+
+int MGLUpdateGuestBufo(mapbufo_t *bufo, int add)
+{
+    int ret = GetBufOAccelEN()? whpx_enabled():0;
+
+    if (ret && bufo) {
+        bufo->lvl = (add)? MapBufObjGpa(bufo):0;
+        whpx_update_guest_pa_range(MBUFO_BASE | (bufo->gpa & ((MBUFO_SIZE - 1) - (qemu_real_host_page_size() - 1))),
+            bufo->mapsz + (bufo->hva & (qemu_real_host_page_size() - 1)),
+            (void *)(bufo->hva & qemu_real_host_page_mask()),
+            (bufo->acc & GL_MAP_WRITE_BIT)? 0:1, add);
+    }
+
+    return ret;
+}
 
 static LONG WINAPI MGLWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
@@ -125,7 +139,7 @@ static HWND hwnd;
 static HDC hDC, hPBDC[MAX_PBUFFER];
 static HGLRC hRC[MAX_LVLCNTX], hPBRC[MAX_PBUFFER];
 static HPBUFFERARB hPbuffer[MAX_PBUFFER];
-static int wnd_ready;
+static int wnd_ready, GLon12;
 
 static struct {
     HGLRC (WINAPI *CreateContext)(HDC);
@@ -169,10 +183,14 @@ static void MesaDisplayModeset(const int modeset)
     switch(modeset) {
         case 1:
             do {
-                int w, h, fullscreen = mesa_gui_fullscreen(&w, &h);
+                int w, h, fullscreen = mesa_gui_fullscreen(&w, &h), scale_x = GetGLScaleWidth();
                 DEVMODE DevMode;
                 memset(&DevMode, 0, sizeof(DEVMODE));
                 DevMode.dmSize = sizeof(DEVMODE);
+                if (scale_x) {
+                    h = ((1.f * h) / w) * scale_x;
+                    w = scale_x;
+                }
 
                 if (fullscreen && EnumDisplaySettings(NULL, ENUM_CURRENT_SETTINGS, &DevMode)) {
                     DWORD vidBpp = DevMode.dmBitsPerPel, vidRef = DevMode.dmDisplayFrequency;
@@ -265,21 +283,6 @@ void *MesaGLGetProc(const char *proc)
     return (void *)wglFuncs.GetProcAddress(proc);
 }
 
-int MGLUpdateGuestBufo(mapbufo_t *bufo, int add)
-{
-    int ret = GetBufOAccelEN()? whpx_enabled():0;
-
-    if (ret && bufo) {
-        bufo->lvl = (add)? MapBufObjGpa(bufo):0;
-        whpx_update_guest_pa_range(MBUFO_BASE | (bufo->gpa & ((MBUFO_SIZE - 1) - (qemu_real_host_page_size - 1))),
-            bufo->mapsz + (bufo->hva & (qemu_real_host_page_size - 1)),
-            (void *)(bufo->hva & qemu_real_host_page_mask),
-            (bufo->acc & GL_MAP_WRITE_BIT)? 0:1, add);
-    }
-
-    return ret;
-}
-
 void MGLTmpContext(void)
 {
     HWND tmpWin = CreateMesaWindow("dummy", 640, 480, 0);
@@ -295,34 +298,43 @@ void MGLTmpContext(void)
     pfd.cDepthBits = 24;
     pfd.cAlphaBits = 8;
     pfd.cStencilBits = 8;
-    SetPixelFormat(tmpDC, ChoosePixelFormat(tmpDC, &pfd), &pfd);
-    HGLRC tmpGL = wglFuncs.CreateContext(tmpDC);
-    wglFuncs.MakeCurrent(tmpDC, tmpGL);
+    if (tmpWin && tmpDC &&
+        SetPixelFormat(tmpDC, ChoosePixelFormat(tmpDC, &pfd), &pfd)) {
+        HGLRC tmpGL = wglFuncs.CreateContext(tmpDC);
+        if (!tmpGL)
+            DPRINTF("CreateContext() failed, Error 0x%08lx", GetLastError());
+        else {
+            wglFuncs.MakeCurrent(tmpDC, tmpGL);
 
-    wglFuncs.GetPixelFormatAttribivARB = (BOOL (WINAPI *)(HDC, int, int, UINT, const int *, int *))
-        MesaGLGetProc("wglGetPixelFormatAttribivARB");
-    wglFuncs.ChoosePixelFormatARB = (BOOL (WINAPI *)(HDC, const int *, const float *, UINT, int *, UINT *))
-        MesaGLGetProc("wglChoosePixelFormatARB");
-    wglFuncs.GetExtensionsStringARB =  (const char * (WINAPI *)(HDC))
-        MesaGLGetProc("wglGetExtensionsStringARB");
-    wglFuncs.CreateContextAttribsARB = (HGLRC (WINAPI *)(HDC, HGLRC, const int *))
-        MesaGLGetProc("wglCreateContextAttribsARB");
-    wglFuncs.SwapIntervalEXT = (BOOL (WINAPI *)(int))
-        MesaGLGetProc("wglSwapIntervalEXT");
-    wglFuncs.GetSwapIntervalEXT = (int (WINAPI *)(void))
-        MesaGLGetProc("wglGetSwapIntervalEXT");
+            wglFuncs.GetPixelFormatAttribivARB = (BOOL (WINAPI *)(HDC, int, int, UINT, const int *, int *))
+                MesaGLGetProc("wglGetPixelFormatAttribivARB");
+            wglFuncs.ChoosePixelFormatARB = (BOOL (WINAPI *)(HDC, const int *, const float *, UINT, int *, UINT *))
+                MesaGLGetProc("wglChoosePixelFormatARB");
+            wglFuncs.GetExtensionsStringARB =  (const char * (WINAPI *)(HDC))
+                MesaGLGetProc("wglGetExtensionsStringARB");
+            wglFuncs.CreateContextAttribsARB = (HGLRC (WINAPI *)(HDC, HGLRC, const int *))
+                MesaGLGetProc("wglCreateContextAttribsARB");
+            wglFuncs.SwapIntervalEXT = (BOOL (WINAPI *)(int))
+                MesaGLGetProc("wglSwapIntervalEXT");
+            wglFuncs.GetSwapIntervalEXT = (int (WINAPI *)(void))
+                MesaGLGetProc("wglGetSwapIntervalEXT");
 
-    wglFuncs.MakeCurrent(NULL, NULL);
-    wglFuncs.DeleteContext(tmpGL);
-    ReleaseDC(tmpWin, tmpDC);
-    hwnd = tmpWin;
+            GLon12 = GLIsD3D12();
+            wglFuncs.MakeCurrent(NULL, NULL);
+            wglFuncs.DeleteContext(tmpGL);
+        }
+        ReleaseDC(tmpWin, tmpDC);
+        hwnd = tmpWin;
+    }
 }
 
 #define GLWINDOW_INIT() \
     if (hDC == 0) { if (0) \
     CreateMesaWindow("MesaGL", 640, 480, 1); \
     wnd_ready = 0; \
-    mesa_prepare_window(&cwnd_mesagl); hDC = GetDC(hwnd); }
+    ImplMesaGLReset(); \
+    DPRINTF_COND(GetGLScaleWidth(), "MESAGL window scaled at width %d", GetGLScaleWidth()); \
+    mesa_prepare_window(GetContextMSAA(), GLon12, GetGLScaleWidth(), &cwnd_mesagl); hDC = GetDC(hwnd); }
 
 #define GLWINDOW_FINI() \
     if (0) { } \
@@ -330,7 +342,7 @@ void MGLTmpContext(void)
 
 void MGLDeleteContext(int level)
 {
-    int n = (level >= MAX_LVLCNTX)? (MAX_LVLCNTX - 1):level;
+    int n = (level)? ((level % MAX_LVLCNTX)? (level % MAX_LVLCNTX):1):level;
     wglFuncs.MakeCurrent(NULL, NULL);
     if (n == 0) {
         for (int i = MAX_LVLCNTX; i > 1;) {
@@ -343,7 +355,7 @@ void MGLDeleteContext(int level)
     wglFuncs.DeleteContext(hRC[n]);
     hRC[n] = 0;
     if (!n)
-        MGLActivateHandler(0);
+        MGLActivateHandler(0, 0);
 }
 
 void MGLWndRelease(void)
@@ -383,7 +395,8 @@ int MGLCreateContext(uint32_t gDC)
 
 int MGLMakeCurrent(uint32_t cntxRC, int level)
 {
-    uint32_t i = cntxRC & (MAX_PBUFFER - 1), n = (level >= MAX_LVLCNTX)? (MAX_LVLCNTX - 1):level;
+    int n = (level)? ((level % MAX_LVLCNTX)? (level % MAX_LVLCNTX):1):level;
+    uint32_t i = cntxRC & (MAX_PBUFFER - 1);
     if (cntxRC == (MESAGL_MAGIC - n)) {
         wglFuncs.MakeCurrent(hDC, hRC[n]);
         InitMesaGLExt();
@@ -394,7 +407,7 @@ int MGLMakeCurrent(uint32_t cntxRC, int level)
                 wglFuncs.SwapIntervalEXT(val);
         }
         if (!n)
-            MGLActivateHandler(1);
+            MGLActivateHandler(1, 0);
     }
     if (cntxRC == (((MESAGL_MAGIC & 0xFFFFFFFU) << 4) | i))
         wglFuncs.MakeCurrent(hPBDC[i], hPBRC[i]);
@@ -404,14 +417,13 @@ int MGLMakeCurrent(uint32_t cntxRC, int level)
 
 int MGLSwapBuffers(void)
 {
-    MGLActivateHandler(1);
+    MGLActivateHandler(1, 0);
     return SwapBuffers(hDC);
 }
 
 static int MGLPresetPixelFormat(void)
 {
     int ipixfmt = 0;
-    ImplMesaGLReset();
 
     if (wglFuncs.ChoosePixelFormatARB) {
         static const float fa[] = {0, 0};
@@ -463,12 +475,15 @@ int MGLSetPixelFormat(int fmt, const void *p)
     int curr, ret;
     GLWINDOW_INIT();
     curr = GetPixelFormat(hDC);
-    if (curr == 0)
+    if (curr == 0) {
         curr = MGLPresetPixelFormat();
-    else {
-        TmpContextPurge();
-        ImplMesaGLReset();
+        ret = SetPixelFormat(hDC, curr, (ppfd->nSize)? ppfd:0);
     }
+    else {
+        ret = 1;
+        TmpContextPurge();
+    }
+
     if (wglFuncs.GetPixelFormatAttribivARB) {
         static const int iattr[] = {
             WGL_AUX_BUFFERS_ARB,
@@ -482,7 +497,6 @@ int MGLSetPixelFormat(int fmt, const void *p)
         DPRINTF("PixFmt 0x%02x nAux %d nSamples %d %d %s", curr,
             cattr[0], cattr[1], cattr[2], (cattr[3])? "sRGB":"");
     }
-    ret = SetPixelFormat(hDC, curr, (ppfd->nSize)? ppfd:0);
     DPRINTF("SetPixelFormat() fmt 0x%02x ret %d", curr, (ret)? 1:0);
     return ret;
 }
@@ -514,19 +528,23 @@ int MGLDescribePixelFormat(int fmt, unsigned int sz, void *p)
             ppfd->cRedBits, ppfd->cGreenBits, ppfd->cBlueBits, ppfd->cAlphaBits,
             ppfd->cAlphaShift, ppfd->cRedShift, ppfd->cGreenShift, ppfd->cBlueShift);
     }
-    return 1;
+    return curr;
 }
 
-void MGLActivateHandler(int i)
+void MGLActivateHandler(const int i, const int d)
 {
-    static int last = 0;
+    static int last;
 
     if (i != last) {
         last = i;
         DPRINTF_COND(GLFuncTrace(), "wm_activate %-32d", i);
-        if (i)
-            MesaDisplayModeset(1);
-        mesa_renderer_stat(i);
+        if (i) {
+            deactivateGuiRefSched();
+            MesaDisplayModeset(i);
+            mesa_renderer_stat(i);
+        }
+        else
+            deactivateSched(d);
     }
 }
 
@@ -636,6 +654,7 @@ void MGLFuncHandler(const char *name)
                         hRC[i] = 0;
                     }
                 }
+                MGLActivateHandler(0, 0);
                 hRC[0] = wglFuncs.CreateContextAttribsARB(hDC, 0, (const int *)&argsp[2]);
                 ret = (hRC[0])? 1:0;
             }
@@ -786,12 +805,74 @@ void MGLFuncHandler(const char *name)
         argsp[0] = ret;
         return;
     }
+    FUNCP_HANDLER("wglSetDeviceCursor3DFX") {
+        return;
+    }
 
     DPRINTF("  *WARN* Unhandled GLFunc %s", name);
     argsp[0] = 0;
 }
 
 #endif //CONFIG_WIN32
+
+void MGLCursorDefine(int hot_x, int hot_y, int width, int height,
+                        const void *data)
+{
+    mesa_cursor_define(hot_x, hot_y, width, height, data);
+}
+
+void MGLMouseWarp(const uint32_t ci)
+{
+    static uint32_t last_ci = 0;
+
+    if (ci != last_ci) {
+        last_ci = ci;
+        int x = ((ci >> 16) & 0x7FFFU),
+            y = (ci & 0x7FFFU), on = (ci)? 1:0;
+        mesa_mouse_warp(x, y, on);
+    }
+}
+
+static QEMUTimer *ts;
+static void deactivateOnce(void)
+{
+    MGLMouseWarp(0);
+    mesa_renderer_stat(0);
+}
+static void deactivateOneshot(void *opaque)
+{
+    deactivateCancel();
+    deactivateOnce();
+}
+void deactivateCancel(void)
+{
+    if (ts) {
+        timer_del(ts);
+        timer_free(ts);
+        ts = 0;
+    }
+}
+void deactivateSched(const int deferred)
+{
+    if (!deferred)
+        deactivateOneshot(0);
+    else {
+        deactivateCancel();
+        ts = timer_new_ms(QEMU_CLOCK_VIRTUAL, deactivateOneshot, 0);
+        timer_mod(ts, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + GetDispTimerMS());
+    }
+}
+static void deactivateGuiRefOneshot(void *opaque)
+{
+    deactivateCancel();
+    graphic_hw_halt(0x81U);
+}
+void deactivateGuiRefSched(void)
+{
+    deactivateCancel();
+    ts = timer_new_ms(QEMU_CLOCK_VIRTUAL, deactivateGuiRefOneshot, 0);
+    timer_mod(ts, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + GUI_REFRESH_INTERVAL_DEFAULT);
+}
 
 int find_xstr(const char *xstr, const char *str)
 {
@@ -867,7 +948,7 @@ static void profile_stat(void)
     p->ftime += (curr - p->last) * (1.0f /  NANOSECONDS_PER_SECOND);
     p->last = curr;
 
-    i = (GLFifoTrace() || GLFuncTrace())? 0:((int) p->ftime);
+    i = (GLFifoTrace() || GLFuncTrace() || GLShaderDump())? 0:((int) p->ftime);
     if (i && ((i % 5) == 0))
 	profile_dump();
 }

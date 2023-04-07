@@ -76,6 +76,14 @@ int ExtFuncIsValid(char *name)
     return (i == FEnum_zzMGLFuncEnum_max)? 0:((tblMesaGL[i].ptr)? 1:0);
 }
 
+int GLIsD3D12(void)
+{
+    const char d3d12[] = "D3D12";
+    const char * (__stdcall *p_glGetString)(int) = (const char *(__stdcall *)(int))
+        tblMesaGL[FEnum_glGetString].ptr;
+    return (!memcmp(p_glGetString(GL_RENDERER), d3d12, sizeof(d3d12) - 1));
+}
+
 int wrMapOrderPoints(uint32_t target)
 {
     int v[2] = {1, 1};
@@ -121,6 +129,27 @@ int wrGetParamIa1p2(int FEnum, uint32_t arg0, uint32_t arg1)
     fpa1p2 = tblMesaGL[sel].ptr;
     fpa1p2(arg0, arg1, (uintptr_t)&ret);
     return ret;
+}
+
+void wrCompileShaderStatus(uint32_t shader)
+{
+    int status, length, type;
+    char *errmsg;
+    void (__stdcall *wrGetShaderiv)(uint32_t, uint32_t, int *) =
+        tblMesaGL[FEnum_glGetShaderiv].ptr;
+    void (__stdcall *wrGetShaderInfoLog)(uint32_t, int, int *, char *) =
+        tblMesaGL[FEnum_glGetShaderInfoLog].ptr;
+    wrGetShaderiv(shader, GL_SHADER_TYPE, &type);
+    wrGetShaderiv(shader, GL_COMPILE_STATUS, &status);
+    if (!status) {
+        wrGetShaderiv(shader, GL_INFO_LOG_LENGTH, &length);
+        errmsg = g_malloc(length);
+        wrGetShaderInfoLog(shader, length, &length, errmsg);
+        fprintf(stderr, "%s\n", errmsg);
+        g_free(errmsg);
+    }
+    DPRINTF("%s shader compilation %s", (type == GL_VERTEX_SHADER)? "vertex":"fragment",
+        (status)? "PASS":"FAIL");
 }
 
 void wrFillBufObj(uint32_t target, void *dst, mapbufo_t *bufo)
@@ -235,6 +264,7 @@ void doMesaFunc(int FEnum, uint32_t *arg, uintptr_t *parg, uintptr_t *ret)
         uint32_t (__stdcall *fpa0p2)(uint32_t, uintptr_t, uintptr_t);
         uint32_t (__stdcall *fpa0p3)(uint32_t, uintptr_t, uintptr_t, uintptr_t);
         uint32_t (__stdcall *fpa1p2)(uint32_t, uint32_t, uintptr_t);
+        uint32_t (__stdcall *fpa1p2a3)(uint32_t, uint32_t, uintptr_t, uint32_t);
         uint32_t (__stdcall *fpa1p3)(uint32_t, uint32_t, uintptr_t, uintptr_t);
         uint32_t (__stdcall *fpa0p2a3)(uint32_t, uintptr_t, uintptr_t, uint32_t);
         uint32_t (__stdcall *fpa2p3)(uint32_t, uint32_t, uint32_t, uintptr_t);
@@ -353,6 +383,8 @@ void doMesaFunc(int FEnum, uint32_t *arg, uintptr_t *parg, uintptr_t *ret)
             GLDONE();
         case FEnum_glGetActiveUniform:
         case FEnum_glGetActiveUniformARB:
+        case FEnum_glGetTransformFeedbackVarying:
+        case FEnum_glGetTransformFeedbackVaryingEXT:
             usfp.fpa2p6 = tblMesaGL[FEnum].ptr;
             *ret = (*usfp.fpa2p6)(arg[0], arg[1], arg[2], parg[3], parg[0], parg[1], parg[2]);
             GLDONE();
@@ -798,6 +830,11 @@ void doMesaFunc(int FEnum, uint32_t *arg, uintptr_t *parg, uintptr_t *ret)
         case FEnum_glViewportArrayv:
             usfp.fpa1p2 = tblMesaGL[FEnum].ptr;
             *ret = (*usfp.fpa1p2)(arg[0], arg[1], parg[2]);
+            GLDONE();
+        case FEnum_glTransformFeedbackVaryings:
+        case FEnum_glTransformFeedbackVaryingsEXT:
+            usfp.fpa1p2a3 = tblMesaGL[FEnum].ptr;
+            *ret = (*usfp.fpa1p2a3)(arg[0], arg[1], parg[2], arg[3]);
             GLDONE();
         case FEnum_glGetAttachedShaders:
         case FEnum_glGetInfoLogARB:
@@ -1446,10 +1483,12 @@ static int cfg_xLength;
 static int cfg_vertCacheMB;
 static int cfg_dispTimerMS;
 static int cfg_bufoAccelEN;
+static int cfg_scaleX;
 static int cfg_cntxMSAA;
 static int cfg_cntxSRGB;
 static int cfg_cntxVsyncOff;
 static int cfg_fpsLimit;
+static int cfg_shaderDump;
 static int cfg_traceFifo;
 static int cfg_traceFunc;
 static void conf_MGLOptions(void)
@@ -1457,11 +1496,9 @@ static void conf_MGLOptions(void)
     cfg_xYear = 0;
     cfg_xLength = 0;
     cfg_vertCacheMB = 32;
-    cfg_dispTimerMS = 2000;
-    cfg_bufoAccelEN = 0;
-    cfg_cntxMSAA = 0;
     cfg_cntxSRGB = 0;
     cfg_cntxVsyncOff = 0;
+    cfg_shaderDump = 0;
     cfg_fpsLimit = 0;
     cfg_traceFifo = 0;
     cfg_traceFunc = 0;
@@ -1480,14 +1517,18 @@ static void conf_MGLOptions(void)
             cfg_dispTimerMS = (i == 1)? v:cfg_dispTimerMS;
             i = sscanf(line, "BufOAccelEN,%d", &v);
             cfg_bufoAccelEN = ((i == 1) && v)? 1:cfg_bufoAccelEN;
+            i = sscanf(line, "ScaleWidth,%d", &v);
+            cfg_scaleX = ((i == 1) && v)? (v & 0x7FFFU):cfg_scaleX;
             i = sscanf(line, "ContextMSAA,%d", &v);
-            cfg_cntxMSAA = (i == 1)? v:cfg_cntxMSAA;
+            cfg_cntxMSAA = (i == 1)? ((v & 0x03U) << 2):cfg_cntxMSAA;
             i = sscanf(line, "ContextSRGB,%d", &v);
             cfg_cntxSRGB = ((i == 1) && v)? 1:cfg_cntxSRGB;
             i = sscanf(line, "ContextVsyncOff,%d", &v);
             cfg_cntxVsyncOff = ((i == 1) && v)? 1:cfg_cntxVsyncOff;
+            i = sscanf(line, "DumpShader,%d", &v);
+            cfg_shaderDump = ((i == 1) && v)? 1:cfg_shaderDump;
             i = sscanf(line, "FpsLimit,%d", &v);
-            cfg_fpsLimit = (i == 1)? (v & 0x3FU):cfg_fpsLimit;
+            cfg_fpsLimit = (i == 1)? (v & 0x7FU):cfg_fpsLimit;
             i = sscanf(line, "FifoTrace,%d", &v);
             cfg_traceFifo = ((i == 1) && v)? 1:cfg_traceFifo;
             i = sscanf(line, "FuncTrace,%d", &v);
@@ -1503,15 +1544,31 @@ int ContextUseSRGB(void)
     wrIsEnabled = tblMesaGL[FEnum_glIsEnabled].ptr;
     return (cfg_cntxSRGB | wrIsEnabled(GL_FRAMEBUFFER_SRGB)? 1:0);
 }
-void GLBufOAccelCfg(int enable) { cfg_bufoAccelEN = (enable)? 1:0; }
+int SwapFpsLimit(int fps)
+{
+    int ret;
+    if (fps && (fps != cfg_fpsLimit)) {
+        cfg_fpsLimit = fps;
+        ret = 1;
+    }
+    else
+        ret = 0;
+    return ret;
+}
+void GLBufOAccelCfg(int enable) { cfg_bufoAccelEN = enable; }
+void GLScaleWidth(int width) { cfg_scaleX = width; }
+void GLContextMSAA(int msaa) { cfg_cntxMSAA = msaa; }
+void GLDispTimerCfg(int msec) { cfg_dispTimerMS = msec; }
 void GLExtUncapped(void) { cfg_xYear = 0; cfg_xLength = 0; }
 int GetGLExtYear(void) { return cfg_xYear; }
 int GetGLExtLength(void) { return cfg_xLength; }
+int GetGLScaleWidth(void) { return cfg_scaleX; }
 int GetVertCacheMB(void) { return cfg_vertCacheMB; }
 int GetDispTimerMS(void) { return cfg_dispTimerMS; }
 int GetBufOAccelEN(void) { return cfg_bufoAccelEN; }
-int GetContextMSAA(void) { return cfg_cntxMSAA; }
+int GetContextMSAA(void) { return (cfg_cntxMSAA > 8)? 16:cfg_cntxMSAA; }
 int ContextVsyncOff(void) { return cfg_cntxVsyncOff; }
+int GLShaderDump(void) { return cfg_shaderDump; }
 int GetFpsLimit(void) { return cfg_fpsLimit; }
 int GLFifoTrace(void) { return cfg_traceFifo; }
 int GLFuncTrace(void) { return (cfg_traceFifo)? 0:cfg_traceFunc; }

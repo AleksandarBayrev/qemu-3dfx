@@ -20,7 +20,6 @@
 
 #include "qemu/osdep.h"
 #include "qemu/timer.h"
-#include "qemu-common.h"
 #include "ui/console.h"
 
 #include "mesagl_impl.h"
@@ -36,6 +35,7 @@
 #if defined(CONFIG_DARWIN) && CONFIG_DARWIN
 const char dllname[] = "/System/Library/Frameworks/OpenGL.framework/Libraries/libGL.dylib";
 int MGLUpdateGuestBufo(mapbufo_t *bufo, int add) { return 0; }
+#define GL_CONTEXTALPHA GetDispTimerMS()
 #define GL_DELETECONTEXT(x)
 #define GL_CONTEXTATTRIB(x)
 #define GL_CREATECONTEXT(x)
@@ -49,17 +49,19 @@ int MGLUpdateGuestBufo(mapbufo_t *bufo, int add)
 
     if (ret && bufo) {
         bufo->lvl = (add)? MapBufObjGpa(bufo):0;
-        kvm_update_guest_pa_range(MBUFO_BASE | (bufo->gpa & ((MBUFO_SIZE - 1) - (qemu_real_host_page_size - 1))),
-            bufo->mapsz + (bufo->hva & (qemu_real_host_page_size - 1)),
-            (void *)(bufo->hva & qemu_real_host_page_mask),
+        kvm_update_guest_pa_range(MBUFO_BASE | (bufo->gpa & ((MBUFO_SIZE - 1) - (qemu_real_host_page_size() - 1))),
+            bufo->mapsz + (bufo->hva & (qemu_real_host_page_size() - 1)),
+            (void *)(bufo->hva & qemu_real_host_page_mask()),
             (bufo->acc & GL_MAP_WRITE_BIT)? 0:1, add);
     }
 
     return ret;
 }
+#define GL_CONTEXTALPHA 1
 #define GL_DELETECONTEXT(x) \
     do { SDL_GL_DeleteContext(x); x = 0; } while(0)
 #define GL_CONTEXTATTRIB(x) \
+    MGLActivateHandler(0, 0); \
     do { \
         int major, minor, pfmsk, flags; \
         major = LookupAttribArray((const int *)&argsp[2], WGL_CONTEXT_MAJOR_VERSION_ARB); \
@@ -276,7 +278,7 @@ void MGLTmpContext(void)
 
 void MGLDeleteContext(int level)
 {
-    int n = (level >= MAX_LVLCNTX)? (MAX_LVLCNTX - 1):level;
+    int n = (level)? ((level % MAX_LVLCNTX)? (level % MAX_LVLCNTX):1):level;
     SDL_GL_MakeCurrent(window, NULL);
     if (n == 0) {
         for (int i = MAX_LVLCNTX; i > 1;) {
@@ -287,7 +289,7 @@ void MGLDeleteContext(int level)
     }
     GL_DELETECONTEXT(ctx[n]);
     if (!n)
-        MGLActivateHandler(0);
+        MGLActivateHandler(0, 0);
 }
 
 void MGLWndRelease(void)
@@ -321,7 +323,8 @@ int MGLCreateContext(uint32_t gDC)
 
 int MGLMakeCurrent(uint32_t cntxRC, int level)
 {
-    uint32_t i = cntxRC & (MAX_PBUFFER - 1), n = (level >= MAX_LVLCNTX)? (MAX_LVLCNTX - 1):level;
+    int n = (level)? ((level % MAX_LVLCNTX)? (level % MAX_LVLCNTX):1):level;
+    uint32_t i = cntxRC & (MAX_PBUFFER - 1);
     if (cntxRC == (MESAGL_MAGIC - n)) {
         SDL_GL_MakeCurrent(window, ctx[n]);
         InitMesaGLExt();
@@ -331,7 +334,7 @@ int MGLMakeCurrent(uint32_t cntxRC, int level)
             SDL_GL_SetSwapInterval(val);
         }
         if (!n)
-            MGLActivateHandler(1);
+            MGLActivateHandler(1, 0);
     }
     if (cntxRC == (((MESAGL_MAGIC & 0xFFFFFFFU) << 4) | i))
     { /* Pbuffer unsupported */ }
@@ -341,7 +344,7 @@ int MGLMakeCurrent(uint32_t cntxRC, int level)
 
 int MGLSwapBuffers(void)
 {
-    MGLActivateHandler(1);
+    MGLActivateHandler(1, 0);
     SDL_GL_SwapWindow(window);
     return 1;
 }
@@ -349,9 +352,10 @@ int MGLSwapBuffers(void)
 static int MGLPresetPixelFormat(void)
 {
     wnd_ready = 0;
-    mesa_prepare_window(&cwnd_mesagl);
-
     ImplMesaGLReset();
+    DPRINTF_COND(GetGLScaleWidth(), "MESAGL window scaled at width %d", GetGLScaleWidth());
+    mesa_prepare_window(GetContextMSAA(), GL_CONTEXTALPHA, GetGLScaleWidth(), &cwnd_mesagl);
+
     MesaInitGammaRamp();
     return 1;
 }
@@ -418,16 +422,21 @@ int MGLDescribePixelFormat(int fmt, unsigned int sz, void *p)
     return 1;
 }
 
-void MGLActivateHandler(int i)
+void MGLActivateHandler(const int i, const int d)
 {
-    static int last = 0;
+    static int last;
 
 #define WA_ACTIVE 1
 #define WA_INACTIVE 0
     if (i != last) {
         last = i;
         DPRINTF_COND(GLFuncTrace(), "wm_activate %-32d", i);
-        mesa_renderer_stat(i);
+        if (i) {
+            deactivateGuiRefSched();
+            mesa_renderer_stat(i);
+        }
+        else
+            deactivateSched(d);
     }
 }
 
@@ -624,10 +633,12 @@ void MGLFuncHandler(const char *name)
         argsp[0] = ret;
         return;
     }
+    FUNCP_HANDLER("wglSetDeviceCursor3DFX") {
+        return;
+    }
 
     DPRINTF("  *WARN* Unhandled GLFunc %s", name);
     argsp[0] = 0;
 }
 
 #endif //MESAGL_SDLGL
-
