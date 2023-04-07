@@ -1,6 +1,6 @@
 #!/bin/bash
 bash ./clean.sh
-wget https://download.qemu.org/qemu-7.2.0.tar.xz
+wget --no-check-certificate https://download.qemu.org/qemu-7.2.0.tar.xz
 tar xfv qemu-7.2.0.tar.xz
 rm -rfv qemu-7.2.0.tar.xz
 cd qemu-6.2.0

@@ -1,6 +1,6 @@
 #!/bin/bash
 bash ./clean.sh
-wget https://download.qemu.org/qemu-4.1.1.tar.xz
+wget --no-check-certificate https://download.qemu.org/qemu-4.1.1.tar.xz
 tar xfv qemu-4.1.1.tar.xz
 rm -rfv qemu-4.1.1.tar.xz
 cd qemu-4.1.1
