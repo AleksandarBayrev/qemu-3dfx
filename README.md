@@ -17,6 +17,16 @@ Witness, experience and share your thoughts on modern CPU/GPU prowess for retro 
 - VOGONS forums (https://www.vogons.org)
 - Wiki (https://github.com/kjliew/qemu-3dfx/wiki)
 ## Building QEMU
+### Dependencies (build based on Fedora 37 Host)
+* `ninja-build`
+* `glib2-devel`
+* `meson`
+* `pixman-devel`
+* `SDL2-devel`
+* `libXext-devel`
+* `libXxf86vm-devel`
+
+### Instructions
 Following instructions are based on `MSYS2/mingw-w64` BASH shell environment on Windows 10/11. It is meant to be simple and minor variations are inevitable due to different flavors of Linux distributions.
 
 Simple guide to apply the patch:<br>
