@@ -70,7 +70,7 @@ Or use the predefined scripts for respective versions (it builds the x86 version
  - Copy `OPENGL32.DLL` to `Game Installation` folders
 
 ## Using qemu after building
-* To create virtual hard drive: `./qemu-img.exe create -f qcow2 win98se.qcw 20000M` (change the value of `20000M` to your HDD size requirements)
+* To create virtual hard drive: `./qemu-img create -f qcow2 win98se.qcw 20000M` (change the value of `20000M` to your HDD size requirements)
 * To start installation: `./qemu-system-i386 -nodefaults -rtc base=localtime -M pc,accel=kvm,hpet=off,usb=off -cpu host -display sdl -device VGA -device lsi -device ac97 -netdev user,id=net0 -device pcnet,rombar=0,netdev=net0 -drive id=win98,if=none,file=win98se.qcw -device scsi-hd,drive=win98 -boot d -cdrom win98.iso`
 * To start drive: `./qemu-system-i386 -nodefaults -rtc base=localtime -M pc,accel=kvm,hpet=off,usb=off -cpu host -display sdl -device VGA -device lsi -device ac97 -netdev user,id=net0 -device pcnet,rombar=0,netdev=net0 -boot c -drive id=win98,if=none,file=win98se.qcw -device scsi-hd,drive=win98 -cdrom win98.iso`
 
