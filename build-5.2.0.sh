@@ -10,3 +10,4 @@ patch -p0 -i ../02-qemu520-mesa-glide.patch
 bash ../scripts/sign_commit
 rm -rfv ../build && mkdir ../build && cd ../build
 ../qemu-5.2.0/configure --target-list=i386-softmmu && make -j
+bash ./after-build-cleanup.sh
